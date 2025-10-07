@@ -1,3 +1,5 @@
+
+import { db, fetchProducts, upsertProduct, addSale } from "./lib/firebase";
 import React, { useEffect, useMemo, useState } from "react";
 
 /** ========== Types ========== */
