@@ -4,10 +4,10 @@ import {
   initializeFirestore,
   persistentLocalCache,
   persistentSingleTabManager,
-  collection, doc, getDocs, getDoc, setDoc, addDoc, serverTimestamp, query, orderBy
+  collection, doc, getDocs, getDoc, setDoc, addDoc, deleteDoc,
+  query, orderBy, serverTimestamp
 } from "firebase/firestore";
 
-// ✅ Gunakan environment variables dari Netlify
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
@@ -15,26 +15,22 @@ const firebaseConfig = {
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
-// 🔥 Inisialisasi Firebase
 const app = initializeApp(firebaseConfig);
 
-// 🔄 Firestore dengan offline persistence
+// Firestore dengan cache offline
 export const db = initializeFirestore(app, {
   localCache: persistentLocalCache({ tabManager: persistentSingleTabManager() })
 });
 
-// ================== CRUD HELPERS ==================
-
-// 🟩 Ambil daftar produk
-export async function fetchProducts(): Promise<any[]> {
+// ===== PRODUCTS =====
+export async function fetchProducts() {
   const snap = await getDocs(collection(db, "products"));
-  return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  return snap.docs.map(d => ({ id: isNaN(Number(d.id)) ? d.id : Number(d.id), ...d.data() }));
 }
 
-// 🟩 Tambah / update produk
 export async function upsertProduct(p: any) {
   const ref = doc(collection(db, "products"), String(p.id));
   await setDoc(ref, {
@@ -45,23 +41,27 @@ export async function upsertProduct(p: any) {
   }, { merge: true });
 }
 
-// 🟦 Ambil daftar transaksi
-export async function fetchSales(): Promise<any[]> {
-  const q = query(collection(db, "sales"), orderBy("createdAt", "desc"));
+export async function removeProduct(id: string | number) {
+  const ref = doc(collection(db, "products"), String(id));
+  await deleteDoc(ref);
+}
+
+// ===== SALES =====
+export async function addSale(rec: any) {
+  await addDoc(collection(db, "sales"), {
+    ...rec,
+    createdAt: serverTimestamp()
+  });
+}
+
+export async function fetchSales() {
+  const q = query(collection(db, "sales"), orderBy("timeMs", "desc"));
   const snap = await getDocs(q);
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
-// 🟧 Simpan transaksi baru
-export async function addSale(rec: any) {
-  await addDoc(collection(db, "sales"), {
-    ...rec,
-    createdAt: serverTimestamp(),
-  });
-}
-
-// 🟨 Ambil & simpan pengaturan toko (opsional)
-export async function fetchSettings() {
+// ===== SETTINGS (opsional) =====
+export async function getSettings() {
   const ref = doc(collection(db, "meta"), "settings");
   const s = await getDoc(ref);
   return s.exists() ? s.data() : {};
