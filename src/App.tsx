@@ -281,6 +281,21 @@ export default function App() {
   const [newPass, setNewPass] = useState("");
 
   /** -------- Products -------- */
+
+  useEffect(() => {
+  (async () => {
+    try {
+      const cloud = await fetchProducts();
+      if (cloud && cloud.length > 0) {
+        setProducts(cloud as any);
+        localStorage.setItem(K_PRODUCTS, JSON.stringify(cloud));
+      }
+    } catch (e) {
+      console.log("⚠️ Gagal ambil data produk dari Firestore:", e);
+    }
+  })();
+}, []);
+
   const [products, setProducts] = useState<Product[]>(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(K_PRODUCTS) || "null");
