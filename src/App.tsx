@@ -33,8 +33,7 @@ const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
 
 /** ====== Storage Keys ====== */
 const K_SALES = "chafu.sales.v1";
-function IDR(n:number){ // jika fungsi IDR sudah ada, hapus duplikat ini
-  return new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
+
 }
 
 function printReceipt(rec: {
