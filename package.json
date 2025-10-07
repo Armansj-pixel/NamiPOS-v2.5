@@ -1,4 +1,10 @@
 {
+  "dependencies": {
+    "firebase": "^10.12.0"
+  }
+}
+
+{
   "name": "chafu-matcha-pos",
   "private": true,
   "version": "0.0.2",
