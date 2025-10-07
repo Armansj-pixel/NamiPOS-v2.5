@@ -1,0 +1,22 @@
+{
+  "name": "CHAFU MATCHA POS",
+  "short_name": "ChafuPOS",
+  "description": "Kasir CHAFU MATCHA - POS Web App",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#166534",
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
