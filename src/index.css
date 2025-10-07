@@ -1,0 +1,6 @@
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background: #fafafa; color: #111; }
+button { cursor: pointer; }
+input, select, button { font: inherit; }
+hr { border: none; border-top: 1px solid #e5e5e5; }
