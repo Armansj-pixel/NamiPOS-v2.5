@@ -33,6 +33,58 @@ const uid = () => Math.random().toString(36).slice(2, 9).toUpperCase();
 
 /** ====== Storage Keys ====== */
 const K_SALES = "chafu.sales.v1";
+function IDR(n:number){ // jika fungsi IDR sudah ada, hapus duplikat ini
+  return new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
+}
+
+function printReceipt(rec: {
+  id: string;
+  time: string;
+  items: { name: string; qty: number; price: number }[];
+  subtotal: number;
+  cash: number;
+  change: number;
+}) {
+  const w = window.open("", "_blank", "width=380,height=600");
+  if(!w) return;
+  const itemsHtml = rec.items.map(i =>
+    `<tr>
+      <td>${i.name}</td>
+      <td style="text-align:center">${i.qty}x</td>
+      <td style="text-align:right">${IDR(i.price * i.qty)}</td>
+    </tr>`
+  ).join("");
+
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8">
+  <title>Struk</title>
+  <style>
+    body{font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace;}
+    .wrap{width:280px;margin:0 auto}
+    h2{margin:8px 0;text-align:center}
+    table{width:100%;border-collapse:collapse}
+    td{padding:4px 0;border-bottom:1px dashed #ddd;font-size:12px;vertical-align:top}
+    .tot td{border-bottom:none;font-weight:700}
+    .meta{font-size:12px;text-align:center;opacity:.8}
+  </style></head><body>
+    <div class="wrap">
+      <h2>CHAFU MATCHA</h2>
+      <div class="meta">${rec.id}<br/>${rec.time}</div>
+      <hr/>
+      <table>
+        ${itemsHtml}
+        <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${IDR(rec.subtotal)}</td></tr>
+        <tr><td>Dibayar</td><td></td><td style="text-align:right">${IDR(rec.cash)}</td></tr>
+        <tr><td>Kembali</td><td></td><td style="text-align:right">${IDR(rec.change)}</td></tr>
+      </table>
+      <p class="meta">Terima kasih! Follow @chafumatcha</p>
+    </div>
+    <script>window.print()</script>
+  </body></html>`;
+  w.document.write(html);
+  w.document.close();
+}
+
+
 
 /** ====== App ====== */
 export default function App() {
@@ -47,6 +99,42 @@ export default function App() {
 
   // UI tabs
   const [tab, setTab] = useState<"pos" | "history">("pos");
+  <thead>
+  <tr style={{ background:"#2e7d32", color:"#fff" }}>
+    <th style={{ textAlign:"left", padding:6 }}>Waktu</th>
+    <th style={{ textAlign:"left", padding:6 }}>ID</th>
+    <th style={{ textAlign:"left", padding:6 }}>Item</th>
+    <th style={{ textAlign:"left", padding:6 }}>Subtotal</th>
+    <th style={{ width:90, padding:6 }}>Aksi</th> {/* <- tambahkan ini */}
+  </tr>
+</thead>
+
+  <tbody>
+  {sales.map(s => (
+    <tr key={s.id}>
+      <td style={{ padding:6 }}>{s.time}</td>
+      <td style={{ padding:6 }}>{s.id}</td>
+      <td style={{ padding:6 }}>{s.items.map(i=>`${i.name} x${i.qty}`).join(", ")}</td>
+      <td style={{ padding:6 }}>{IDR(s.subtotal)}</td>
+      <td style={{ padding:6 }}>
+        <button
+          onClick={()=>printReceipt({
+            id: s.id,
+            time: s.time,
+            items: s.items.map(i=>({ name:i.name, qty:i.qty, price:i.price })),
+            subtotal: s.subtotal,
+            cash: s.cash,
+            change: s.change
+          })}
+          style={{ background:"#2e7d32", color:"#fff", border:"none", borderRadius:8, padding:"6px 10px", cursor:"pointer" }}
+        >
+          Cetak
+        </button>
+      </td>
+    </tr>
+  ))}
+</tbody>
+
 
   // Persist sales
   useEffect(() => {
@@ -87,6 +175,31 @@ export default function App() {
     alert(`Transaksi tersimpan!\nID: ${rec.id}\nTotal: ${IDR(rec.subtotal)}\nKembali: ${IDR(rec.change)}`);
     setTab("history");
   };
+const rec: SaleRecord = {
+  id: `CM-${new Date().getFullYear()}${String(new Date().getMonth()+1).padStart(2,"0")}-${uid()}`,
+  time: nowStr(),
+  timeMs: Date.now(),
+  items: cart,
+  subtotal,
+  cash,
+  change: Math.max(0, change),
+};
+
+setSales(prev => [rec, ...prev]);
+
+// CETAK OTOMATIS:
+printReceipt({
+  id: rec.id,
+  time: rec.time,
+  items: rec.items.map(i=>({ name:i.name, qty:i.qty, price:i.price })),
+  subtotal: rec.subtotal,
+  cash: rec.cash,
+  change: rec.change
+});
+
+resetCart();
+alert(`Transaksi tersimpan!\nID: ${rec.id}\nTotal: ${IDR(rec.subtotal)}\nKembali: ${IDR(rec.change)}`);
+setTab("history");
 
   /** ====== Export CSV ====== */
   const exportCSV = () => {
