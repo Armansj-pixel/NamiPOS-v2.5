@@ -1,18 +1,20 @@
-// src/App.tsx — CHAFU MATCHA POS (FULL: POS + Inventory + Resep + Riwayat + Laporan + Loyalty)
-// ------------------------------------------------------------------------------------------------
+// src/App.tsx — CHAFU MATCHA POS (FINAL 80mm)
+// ------------------------------------------------------------------------------------
 // Fitur:
-// - Login Firebase (Email/Password) — admin tab berdasarkan email
-// - POS: Tunai + E-Wallet (QR otomatis), cetak struk auto
-// - Inventory (bahan), Resep per produk (auto deduct stok saat transaksi)
-// - Riwayat transaksi (live dari Firestore, admin only)
-// - Dashboard Laporan (harian/mingguan/bulanan/custom) — omzet, trx, AOV, top produk, stok rendah
-// - Loyalty System: Earn & Redeem poin via No HP (1 poin = Rp100, earn: 1 poin / Rp10.000)
-// ------------------------------------------------------------------------------------------------
-// NOTE:
-// - Pastikan file /public/qr-qris.png tersedia (dipakai untuk QRIS/ewallet).
-// - Pastikan responsive.css sudah di-import dan ada di src/responsive.css.
-// - ENV Vite (Vercel/Netlify) harus terisi: VITE_FIREBASE_*
-// ------------------------------------------------------------------------------------------------
+// - Login Firebase (Email/Password) — admin tab by email
+// - POS: Tunai + E-Wallet (QR otomatis), cetak struk auto (thermal 80mm)
+// - Inventory (bahan), Resep (auto deduct stok saat transaksi)
+// - Riwayat transaksi (live Firestore, admin only)
+// - Dashboard Laporan (omzet, trx, AOV, top produk, stok rendah, rentang tanggal)
+// - Loyalty: Earn & Redeem poin by No HP (1 poin / Rp10.000, 1 poin = Rp100; bisa diubah di settings)
+// - Shift Kasir: Buka/Tutup shift, rekap per metode bayar, export CSV
+// - Export CSV (Riwayat/Laporan), Export PDF ringkas (Laporan), Reorder CSV (stok kritis)
+// ------------------------------------------------------------------------------------
+// Kebutuhan:
+// - /public/qr-qris.png untuk QR e-wallet
+// - ENV Firebase (VITE_FIREBASE_*) sudah dihosting (Netlify/Vercel)
+// - file ./lib/firebase.ts sudah yang terbaru (CRUD produk/ingredients/recipes + deductStockForSale)
+// - ./responsive.css untuk styling dasar (optional)
 
 import React, { useEffect, useState } from "react";
 import "./responsive.css";
@@ -36,7 +38,7 @@ import {
   signInWithEmailAndPassword, signOut, User
 } from "firebase/auth";
 
-// =============== Utils ===============
+// ---------------- Utils ----------------
 const IDR = (n: number) =>
   new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
 
@@ -56,7 +58,7 @@ const walletQR: Record<string, string> = {
   Transfer: "/qr-qris.png",
 };
 
-// =============== Types ===============
+// ---------------- Types ----------------
 type Product = { id: number; name: string; price: number; active?: boolean };
 type CartItem = { id: string; productId: number; name: string; price: number; qty: number };
 
@@ -84,7 +86,27 @@ type SaleRow = {
   deviceDate?: number;
 };
 
-// =============== Default seed (1x jika kosong) ===============
+type ShiftDoc = {
+  id?: string;
+  openedAt: number;
+  openedBy: string;
+  closedAt?: number | null;
+  closedBy?: string | null;
+  cashOpen?: number;
+  cashClose?: number;
+  totals?: Record<string, number>;
+  trxCount?: number;
+};
+
+type SettingsDoc = {
+  pointEarnPerRp: number;     // 1 poin / X rupiah
+  pointValueRp: number;       // 1 poin = Y rupiah
+  maxRedeemPoints?: number;   // batas poin per trx (0 = no limit)
+  pointExpiryDays?: number;   // 0 = no expiry (tidak dipakai di UI)
+  lowStockThreshold?: number; // ambang stok rendah
+};
+
+// ---------------- Defaults ----------------
 const DEFAULT_PRODUCTS: Product[] = [
   { id: 1, name: "Matcha OG", price: 15000, active: true },
   { id: 2, name: "Matcha Cloud", price: 18000, active: true },
@@ -96,7 +118,15 @@ const DEFAULT_PRODUCTS: Product[] = [
   { id: 8, name: "Orange Matcha", price: 17000, active: true },
 ];
 
-// =============== App ===============
+const DEFAULT_SETTINGS: SettingsDoc = {
+  pointEarnPerRp: 10000,
+  pointValueRp: 100,
+  maxRedeemPoints: 0,
+  pointExpiryDays: 0,
+  lowStockThreshold: 10,
+};
+
+// ---------------- App ----------------
 export default function App() {
   const auth = getAuth();
 
@@ -113,25 +143,30 @@ export default function App() {
   const [ingredients, setIngredients] = useState<InvIngredient[]>([]);
   const [recipes, setRecipes] = useState<RecipeDoc[]>([]);
 
+  // Settings
+  const [settingsDoc, setSettingsDoc] = useState<SettingsDoc>(DEFAULT_SETTINGS);
+
   // POS
   const [cart, setCart] = useState<CartItem[]>([]);
   const [payMethod, setPayMethod] = useState<PayMethod>("Tunai");
   const [cash, setCash] = useState<number>(0);
   const subtotal = cart.reduce((a, b) => a + b.price * b.qty, 0);
 
-  // Riwayat (admin)
+  // Riwayat
   const [sales, setSales] = useState<SaleRow[]>([]);
 
-  // Loyalty
+  // Loyalty + katalog pelanggan
   const [customerPhone, setCustomerPhone] = useState("");
+  const [customerName, setCustomerName] = useState("");
   const [customerPoints, setCustomerPoints] = useState<number | null>(null);
+  const [customerSuggest, setCustomerSuggest] = useState<{ phone: string; name?: string; points?: number }[]>([]);
   const [usePoints, setUsePoints] = useState<number>(0);
-  function calcEarnedPoints(total: number) { return Math.floor(total / 10000); }        // earn: 1 poin / Rp10.000
-  function pointsToRupiah(pts: number) { return pts * 100; }                            // redeem: 1 poin = Rp100
-  // function rupiahToPoints(rp: number) { return Math.floor(rp / 100); }               // jika dibutuhkan
+
+  // Shift
+  const [activeShift, setActiveShift] = useState<ShiftDoc | null>(null);
 
   // Laporan
-  const [from, setFrom] = useState<string>(""); // yyyy-mm-dd
+  const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
   const [report, setReport] = useState<{ omzet: number; trx: number; aov: number; top: { name: string; qty: number }[] }>({
     omzet: 0, trx: 0, aov: 0, top: []
@@ -141,12 +176,15 @@ export default function App() {
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (u) => {
       setUser(u);
-      if (u) await ensureUserProfile(u);
+      if (u) {
+        await ensureUserProfile(u);
+        await loadSettings();
+      }
     });
     return () => unsub();
   }, []);
 
-  // ---------- Load master + subscribe riwayat ----------
+  // ---------- Load master + subscribe riwayat + shift ----------
   useEffect(() => {
     if (!user) return;
     loadData();
@@ -157,6 +195,16 @@ export default function App() {
         const rows: SaleRow[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
         setSales(rows);
       });
+      // fetch active shift
+      (async () => {
+        const qy = query(collection(db, "shifts"), where("closedAt", "==", null), orderBy("openedAt", "desc"));
+        const ss = await getDocs(qy);
+        if (!ss.empty) {
+          const d = ss.docs[0];
+          setActiveShift({ id: d.id, ...(d.data() as any) });
+        } else setActiveShift(null);
+      })();
+
       return () => unsub();
     }
   }, [user]);
@@ -166,11 +214,25 @@ export default function App() {
     return ADMIN_EMAILS.includes((e || "").toLowerCase());
   }
   const isAdmin = !!(user && isAdminEmail(user.email || ""));
+
+  function calcEarnedPoints(total: number) {
+    const per = settingsDoc.pointEarnPerRp || 10000;
+    return Math.floor(total / per);
+  }
+  function pointsToRupiah(pts: number) {
+    const val = settingsDoc.pointValueRp || 100;
+    return pts * val;
+  }
+
+  const redeemCap = (settingsDoc.maxRedeemPoints && settingsDoc.maxRedeemPoints > 0)
+    ? Math.min(customerPoints || 0, settingsDoc.maxRedeemPoints)
+    : (customerPoints || 0);
+
   const redeemValueRp = pointsToRupiah(usePoints || 0);
   const finalTotal = Math.max(0, subtotal - redeemValueRp);
   const change = payMethod === "Tunai" ? Math.max(0, cash - finalTotal) : 0;
 
-  // ---------- Data loaders ----------
+  // ---------- Loaders ----------
   async function loadData() {
     let p = await fetchProducts();
     if (!p || p.length === 0) {
@@ -180,6 +242,17 @@ export default function App() {
     setProducts(p);
     setIngredients(await fetchIngredients());
     setRecipes(await fetchRecipes());
+  }
+
+  async function loadSettings() {
+    const sref = doc(db, "settings", "global");
+    const snap = await getDoc(sref);
+    if (snap.exists()) {
+      setSettingsDoc({ ...DEFAULT_SETTINGS, ...(snap.data() as SettingsDoc) });
+    } else {
+      await setDoc(sref, DEFAULT_SETTINGS);
+      setSettingsDoc(DEFAULT_SETTINGS);
+    }
   }
 
   async function ensureUserProfile(u: User) {
@@ -230,6 +303,16 @@ export default function App() {
     });
   }
 
+  async function searchCustomerSuggest(prefix: string) {
+    const list: { phone: string; name?: string; points?: number }[] = [];
+    const ex = await getDoc(doc(db, "customers", prefix));
+    if (ex.exists()) {
+      const d = ex.data() as any;
+      list.push({ phone: prefix, name: d.name, points: d.points });
+    }
+    setCustomerSuggest(list);
+  }
+
   // ---------- POS actions ----------
   function addToCart(p: Product) {
     setCart((c) => {
@@ -253,14 +336,21 @@ export default function App() {
     setUsePoints(0);
     setPayMethod("Tunai");
     setCustomerPhone("");
+    setCustomerName("");
   }
 
   async function finalizeSale() {
     if (!cart.length) return alert("Keranjang kosong!");
+    if (usePoints > redeemCap) return alert("Poin yang digunakan melebihi batas.");
     if (payMethod === "Tunai" && cash < finalTotal) return alert("Uang kurang!");
 
     const saleId = Date.now().toString();
     const earned = calcEarnedPoints(finalTotal);
+
+    // simpan/merge nama customer (opsional)
+    if (customerPhone && customerName.trim()) {
+      await setDoc(doc(db, "customers", customerPhone), { name: customerName.trim() }, { merge: true });
+    }
 
     const rec: SaleRow = {
       time: new Date().toLocaleString("id-ID", { hour12: false }),
@@ -268,7 +358,7 @@ export default function App() {
       cashier: user?.email || "-",
       items: cart.map((i) => ({ name: i.name, qty: i.qty, price: i.price })),
       subtotal,
-      discount: redeemValueRp,  // poin sebagai diskon
+      discount: redeemValueRp,
       taxRate: 0,
       serviceRate: 0,
       taxValue: 0,
@@ -285,17 +375,14 @@ export default function App() {
       deviceDate: Date.now(),
     };
 
-    // simpan transaksi
     await addDoc(collection(db, "sales"), rec);
 
-    // loyalty
     if (customerPhone) {
       if (usePoints > 0) await redeemLoyaltyPoints(customerPhone, usePoints, saleId);
       if (earned > 0) await addLoyaltyPoints(customerPhone, earned, saleId);
-      await fetchCustomerPointsByPhone(customerPhone); // refresh saldo
+      await fetchCustomerPointsByPhone(customerPhone);
     }
 
-    // deduct stok
     await deductStockForSale({
       saleId,
       items: cart.map((c) => ({ productId: c.productId, name: c.name, qty: c.qty })),
@@ -303,8 +390,7 @@ export default function App() {
       ingredientsMap: Object.fromEntries(ingredients.map((i) => [String(i.id), i])),
     });
 
-    // print struk
-    printReceipt({
+    printReceipt80mm({
       ...rec,
       subtotal,
       total: finalTotal,
@@ -314,6 +400,55 @@ export default function App() {
 
     clearCart();
     alert("Transaksi selesai ✅");
+  }
+
+  // ---------- Shift ----------
+  async function openShift() {
+    if (activeShift && !activeShift.closedAt) return alert("Shift masih aktif.");
+    const cashOpen = Number(prompt("Cash Drawer Awal (opsional)?") || 0);
+    const sh: ShiftDoc = {
+      openedAt: Date.now(),
+      openedBy: user?.email || "-",
+      cashOpen
+    };
+    const ref = await addDoc(collection(db, "shifts"), { ...sh, closedAt: null });
+    setActiveShift({ ...sh, id: ref.id, closedAt: null });
+    alert("Shift dibuka ✅");
+  }
+
+  async function closeShift() {
+    if (!activeShift || activeShift.closedAt) return alert("Tidak ada shift aktif.");
+    const rows = await getSalesRange(activeShift.openedAt, Date.now());
+    const totals: Record<string, number> = {};
+    let trx = 0;
+    for (const r of rows) {
+      totals[r.payMethod] = (totals[r.payMethod] || 0) + (r.total || 0);
+      trx++;
+    }
+    const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
+    await updateDoc(doc(db, "shifts", activeShift.id!), {
+      closedAt: Date.now(),
+      closedBy: user?.email || "-",
+      totals,
+      trxCount: trx,
+      cashClose
+    });
+    exportShiftCSV({ ...activeShift, totals, trxCount: trx, cashClose, closedAt: Date.now(), closedBy: user?.email || "-" });
+    setActiveShift(null);
+    alert("Shift ditutup ✅ dan CSV diunduh.");
+  }
+
+  function exportShiftCSV(sh: ShiftDoc) {
+    const hdr = ["openedAt", "openedBy", "closedAt", "closedBy", "trxCount", "cashOpen", "cashClose", "method", "amount"];
+    const lines = [hdr.join(",")];
+    const rows = Object.entries(sh.totals || { Unknown: 0 }).map(([m, a]) => [
+      sh.openedAt, sh.openedBy, sh.closedAt, sh.closedBy, sh.trxCount ?? 0, sh.cashOpen ?? 0, sh.cashClose ?? 0, m, a
+    ]);
+    for (const r of rows) lines.push(r.join(","));
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `shift_${sh.openedAt}_${sh.closedAt}.csv`; a.click();
+    URL.revokeObjectURL(url);
   }
 
   // ---------- Laporan ----------
@@ -354,9 +489,69 @@ export default function App() {
   async function loadReport() {
     if (!from || !to) return alert("Pilih tanggal dari & sampai");
     const start = ymdToMs(from);
-    const end = ymdToMs(to) + 24 * 60 * 60 * 1000; // exclusive
+    const end = ymdToMs(to) + 24 * 60 * 60 * 1000;
     const rows = await getSalesRange(start, end);
     setReport(summarizeSales(rows));
+  }
+
+  // ---------- Export ----------
+  function exportSalesCSV() {
+    if (!sales.length) return alert("Tidak ada data.");
+    const hdr = ["time", "payMethod", "total", "items"];
+    const lines = [hdr.join(",")];
+    for (const s of sales) {
+      const items = (s.items || []).map(it => `${it.name} x${it.qty}`).join("; ");
+      lines.push([s.time, s.payMethod, s.total, `"${String(items).replace(/"/g, '""')}"`].join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `sales_${Date.now()}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportReportCSV() {
+    const hdr = ["metric", "value"];
+    const lines = [
+      hdr.join(","),
+      ["omzet", report.omzet].join(","),
+      ["transaksi", report.trx].join(","),
+      ["AOV", report.aov].join(","),
+      "top_product,qty"
+    ];
+    for (const t of report.top) { lines.push([t.name, t.qty].join(",")); }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `report_${from}_${to}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function exportReportPDF() {
+    const w = window.open("", "_blank", "width=800,height=900");
+    if (!w) return;
+    w.document.write(`
+      <html><head><title>Laporan</title></head><body>
+      <h2>Laporan ${from} s/d ${to}</h2>
+      <p>Omzet: ${IDR(report.omzet)}<br/>Transaksi: ${report.trx}<br/>AOV: ${IDR(report.aov)}</p>
+      <h3>Top Produk</h3>
+      <ul>${report.top.map(t => `<li>${t.name} — ${t.qty} cup</li>`).join("")}</ul>
+      </body></html>
+    `);
+    w.document.close(); w.print();
+  }
+
+  function exportReorderCSV() {
+    const low = ingredients.filter(i => i.stock <= (settingsDoc.lowStockThreshold || 10));
+    if (!low.length) return alert("Tidak ada bahan di bawah ambang.");
+    const hdr = ["name", "stock", "unit", "suggested_order"];
+    const lines = [hdr.join(",")];
+    for (const i of low) {
+      const suggested = Math.max((settingsDoc.lowStockThreshold || 10) * 2 - (i.stock || 0), 0);
+      lines.push([i.name, String(i.stock || 0), i.unit || "", String(suggested)].join(","));
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `reorder_${Date.now()}.csv`; a.click();
+    URL.revokeObjectURL(url);
   }
 
   // ---------- Auth UI ----------
@@ -386,7 +581,7 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>CHAFU MATCHA POS</h1>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => setTab("pos")} className="btn">POS</button>
           {isAdmin && (
             <>
@@ -395,6 +590,10 @@ export default function App() {
               <button onClick={() => setTab("resep")} className="btn">Resep</button>
               <button onClick={() => setTab("riwayat")} className="btn">Riwayat</button>
               <button onClick={() => setTab("laporan")} className="btn">Laporan</button>
+              <button onClick={openShift} className="btn">Buka Shift</button>
+              <button onClick={closeShift} className="btn" style={{ background: "#263238", color: "#fff" }}>
+                Tutup Shift {activeShift ? "(aktif)" : ""}
+              </button>
             </>
           )}
           <button onClick={logout} className="btn" style={{ background: "#e53935", color: "#fff" }}>Logout</button>
@@ -421,32 +620,41 @@ export default function App() {
           <section className="section">
             <h2>Keranjang</h2>
 
-            {/* Loyalty: nomor HP & redeem */}
+            {/* Loyalty + katalog */}
             <div>
               <label>No HP (loyalty): </label>
               <input
                 placeholder="08xxxx"
                 value={customerPhone}
-                onChange={(e) => setCustomerPhone(e.target.value)}
+                onChange={(e) => { setCustomerPhone(e.target.value); if (e.target.value.length >= 3) searchCustomerSuggest(e.target.value); }}
+                list="cust-suggest"
               />
+              <datalist id="cust-suggest">
+                {customerSuggest.map(c => (
+                  <option key={c.phone} value={c.phone}>{c.name ? `${c.phone} - ${c.name}` : c.phone}</option>
+                ))}
+              </datalist>
+
+              <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                <input placeholder="Nama pelanggan (opsional)" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
+                {customerPhone && <small>Saldo poin: <b>{customerPoints ?? "-"}</b></small>}
+              </div>
+
               {customerPhone && (
-                <div style={{ marginTop: 6 }}>
-                  <small>Saldo poin: <b>{customerPoints ?? "-"}</b></small>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-                    <label>Gunakan Poin:</label>
-                    <input
-                      type="number"
-                      min={0}
-                      max={Math.max(0, customerPoints || 0)}
-                      value={usePoints}
-                      onChange={(e) => {
-                        const v = Math.max(0, Math.min(Number(e.target.value) || 0, customerPoints || 0));
-                        setUsePoints(v);
-                      }}
-                      style={{ width: 120 }}
-                    />
-                    <small>(Potongan: {IDR(redeemValueRp)})</small>
-                  </div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
+                  <label>Gunakan Poin:</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={Math.max(0, redeemCap)}
+                    value={usePoints}
+                    onChange={(e) => {
+                      const v = Math.max(0, Math.min(Number(e.target.value) || 0, redeemCap));
+                      setUsePoints(v);
+                    }}
+                    style={{ width: 120 }}
+                  />
+                  <small>(Potongan: {IDR(redeemValueRp)})</small>
                 </div>
               )}
             </div>
@@ -528,10 +736,13 @@ export default function App() {
         </main>
       )}
 
-      {/* Riwayat (admin) */}
+      {/* Riwayat */}
       {tab === "riwayat" && isAdmin && (
         <main className="section table-scroll">
-          <h2>Riwayat Transaksi</h2>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+            <h2>Riwayat Transaksi</h2>
+            <button className="btn" onClick={exportSalesCSV}>Export CSV</button>
+          </div>
           {sales.length === 0 ? (
             <p>Belum ada transaksi.</p>
           ) : (
@@ -559,11 +770,19 @@ export default function App() {
         </main>
       )}
 
-      {/* Laporan (admin) */}
+      {/* Laporan */}
       {tab === "laporan" && isAdmin && (
         <main className="section">
-          <h2>Dashboard Laporan</h2>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+            <h2>Dashboard Laporan</h2>
+            <div style={{display:"flex", gap:8}}>
+              <button className="btn" onClick={exportReportCSV}>Export CSV</button>
+              <button className="btn" onClick={exportReportPDF}>Export PDF</button>
+              <button className="btn" onClick={exportReorderCSV}>Reorder CSV</button>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
             <label>Dari:</label>
             <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
             <label>Sampai:</label>
@@ -606,7 +825,7 @@ export default function App() {
           <h3 style={{ marginTop: 16 }}>Stok Rendah</h3>
           <ul>
             {ingredients
-              .filter(i => (i as any).minStock ? i.stock <= (i as any).minStock : i.stock <= 10)
+              .filter(i => i.stock <= (settingsDoc.lowStockThreshold || 10))
               .map(i => <li key={i.id}>{i.name}: {i.stock} {i.unit}</li>)}
           </ul>
         </main>
@@ -615,7 +834,7 @@ export default function App() {
   );
 }
 
-// =============== Sub-Komponen: Product / Inventory / Recipe ===============
+// ---------------- Sub-Komponen ----------------
 
 function ProductManager({ products, onChange }: { products: Product[]; onChange: (x: Product[]) => void }) {
   const [form, setForm] = useState<Product>({ id: 0, name: "", price: 0, active: true });
@@ -635,194 +854,4 @@ function ProductManager({ products, onChange }: { products: Product[]; onChange:
 
   return (
     <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <input placeholder="ID (unik angka)" type="number" value={form.id || ""} onChange={(e) => setForm({ ...form, id: Number(e.target.value) })} />
-        <input placeholder="Nama" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input placeholder="Harga" type="number" value={form.price || 0} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} />
-        <button className="btn" onClick={save}>Simpan</button>
-      </div>
-      {products.map((p) => (
-        <div key={p.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-          <span>{p.name} — {IDR(p.price)}</span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" onClick={() => setForm(p)}>Edit</button>
-            <button className="btn" onClick={() => del(p)}>Hapus</button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredient[]; onChange: (x: InvIngredient[]) => void }) {
-  const [form, setForm] = useState<InvIngredient>({ name: "", unit: "", stock: 0 });
-
-  async function save() {
-    if (!form.name) return alert("Nama bahan wajib diisi!");
-    await upsertIngredient(form);
-    onChange(await fetchIngredients());
-    setForm({ name: "", unit: "", stock: 0 });
-  }
-
-  async function del(i: InvIngredient) {
-    if (!confirm(`Hapus ${i.name}?`)) return;
-    await deleteIngredient(i.id!);
-    onChange(await fetchIngredients());
-  }
-
-  async function adjustItem(i: InvIngredient, delta: number) {
-    const current = Number(i.stock || 0);
-    const newStock = current + delta;
-    await adjustStock([{ ingredientId: String(i.id), newStock, note: delta > 0 ? `+${delta}` : `${delta}` }]);
-    onChange(await fetchIngredients());
-  }
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <input placeholder="Nama bahan" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input placeholder="Satuan (ml/gr/pcs)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
-        <input placeholder="Stok awal" type="number" value={form.stock || 0} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} />
-        <button className="btn" onClick={save}>Simpan</button>
-      </div>
-
-      {ingredients.map((i) => (
-        <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-          <span>{i.name} ({i.stock} {i.unit})</span>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button className="btn" onClick={() => adjustItem(i, 1)}>+1</button>
-            <button className="btn" onClick={() => adjustItem(i, -1)}>-1</button>
-            <button className="btn" onClick={() => setForm(i)}>Edit</button>
-            <button className="btn" onClick={() => del(i)}>Hapus</button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RecipeManager({
-  products,
-  ingredients,
-  recipes,
-  onChange,
-}: {
-  products: Product[];
-  ingredients: InvIngredient[];
-  recipes: RecipeDoc[];
-  onChange: (x: RecipeDoc[]) => void;
-}) {
-  const [selected, setSelected] = useState<number>(0);
-  const [temp, setTemp] = useState<{ [ingredientId: string]: number }>({}); // qty per gelas
-
-  useEffect(() => {
-    const found = recipes.find((r) => r.productId === selected);
-    if (!found) { setTemp({}); return; }
-    const map: { [k: string]: number } = {};
-    for (const it of (found.items || []) as any[]) {
-      if (it.ingredientId) map[it.ingredientId] = Number(it.qty || 0);
-    }
-    setTemp(map);
-  }, [selected, recipes]);
-
-  async function saveRecipe() {
-    if (!selected) return alert("Pilih produk dulu!");
-    const items = Object.entries(temp)
-      .filter(([, qty]) => (qty || 0) > 0)
-      .map(([ingredientId, qty]) => ({ ingredientId, qty }));
-    await setRecipeForProduct(selected, items);
-    const updated = await fetchRecipes();
-    onChange(updated);
-    alert("Resep disimpan!");
-  }
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-        <label>Pilih Produk:</label>
-        <select value={selected} onChange={(e) => setSelected(Number(e.target.value))}>
-          <option value={0}>-- pilih --</option>
-          {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-      </div>
-
-      {selected !== 0 && (
-        <>
-          <h4>Resep per 1 gelas</h4>
-          {ingredients.map((i) => (
-            <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-              <div style={{ flex: 1 }}>{i.name}</div>
-              <input
-                type="number"
-                placeholder="Qty"
-                style={{ width: 90 }}
-                value={temp[i.id!] ?? ""}
-                onChange={(e) =>
-                  setTemp({
-                    ...temp,
-                    [String(i.id)]: Number(e.target.value) || 0,
-                  })
-                }
-              />
-              <small>{i.unit}</small>
-            </div>
-          ))}
-          <button className="btn" onClick={saveRecipe}>Simpan Resep</button>
-        </>
-      )}
-    </div>
-  );
-}
-
-// =============== Print Struk ===============
-function printReceipt(rec: {
-  time: string; cashier: string;
-  items: { name: string; qty: number; price: number }[];
-  subtotal: number; discount: number;
-  taxRate: number; serviceRate: number;
-  taxValue: number; serviceValue: number;
-  total: number; cash: number; change: number;
-}) {
-  const w = window.open("", "_blank", "width=380,height=600");
-  if (!w) return;
-
-  const rows = rec.items.map(
-    (i) => `<tr>
-      <td>${i.name}</td>
-      <td style='text-align:center'>${i.qty}x</td>
-      <td style='text-align:right'>${(i.price * i.qty).toLocaleString('id-ID')}</td>
-    </tr>`
-  ).join("");
-
-  const html = `
-<!doctype html>
-<html><head><meta charset="utf-8"><title>Struk</title>
-<style>
-  body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  .wrap { width: 280px; margin: 0 auto; }
-  h2 { margin: 8px 0; text-align: center; }
-  table { width: 100%; border-collapse: collapse; }
-  td { padding: 4px 0; font-size: 12px; border-bottom: 1px dashed #ddd; }
-  .tot td { border-bottom: none; font-weight: 700; }
-  .meta { font-size: 12px; text-align: center; opacity: .8; }
-</style></head>
-<body>
-  <div class="wrap">
-    <h2>CHAFU MATCHA</h2>
-    <div class="meta">${rec.time}<br/>Kasir: ${rec.cashier}</div>
-    <hr/>
-    <table>
-      ${rows}
-      <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${rec.subtotal.toLocaleString("id-ID")}</td></tr>
-      ${rec.discount ? `<tr class="tot"><td>Potongan Poin</td><td></td><td style="text-align:right">-${rec.discount.toLocaleString("id-ID")}</td></tr>` : ""}
-      <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${rec.total.toLocaleString("id-ID")}</td></tr>
-      ${rec.cash ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${rec.cash.toLocaleString("id-ID")}</td></tr>` : ""}
-      ${rec.cash ? `<tr><td>Kembali</td><td></td><td style='text-align:right'>${rec.change.toLocaleString("id-ID")}</td></tr>` : ""}
-    </table>
-    <p class="meta">Terima kasih! Follow @chafumatcha</p>
-  </div>
-  <script>window.print()</script>
-</body></html>`;
-  w.document.write(html);
-  w.document.close();
-}
+      <div style={{ display: "
