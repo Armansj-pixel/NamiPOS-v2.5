@@ -123,7 +123,88 @@ const DEFAULT_PRODUCTS: Product[] = [
     setCart([]);
     alert("Transaksi selesai!");
   }
+import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { db } from "./lib/firebase";
 
+// saat klik "Selesaikan & Cetak"
+async function finalizeSale() {
+  const rec = {
+    time: new Date().toLocaleString("id-ID", { hour12: false }),
+    items: cart.map(i => ({
+      name: i.name,
+      qty: i.qty,
+      price: i.price,
+    })),
+    subtotal,
+    discount,
+    taxRate: includeTax ? settings.taxRate : 0,
+    service: includeService ? settings.service : 0,
+    total,
+    cash,
+    change,
+    createdAt: serverTimestamp(),
+    cashier: user?.email || "guest"
+  };
+
+  // simpan ke Firestore
+  await addDoc(collection(db, "sales"), rec);
+
+  // cetak struk otomatis
+  printReceipt(rec);
+
+  // kosongkan keranjang
+  clearCart();
+  setPayOpen(false);
+  alert("Transaksi selesai ✅");
+}
+<Button disabled={cash < total} onClick={finalizeSale}>
+  Selesaikan & Cetak
+</Button>
+  function printReceipt(rec) {
+  const w = window.open("", "_blank", "width=380,height=600");
+  if (!w) return;
+
+  const rows = rec.items.map(
+    (i) =>
+      <tr><td>${i.name}</td><td style='text-align:center'>${i.qty}x</td><td style='text-align:right'>${(i.price * i.qty).toLocaleString('id-ID')}</td></tr>
+  ).join("");
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Struk - CHAFU MATCHA</title>
+      <style>
+        body { font-family: monospace; }
+        table { width: 100%; border-collapse: collapse; }
+        td { font-size: 12px; padding: 3px 0; }
+        h2 { text-align: center; margin: 8px 0; }
+        .meta { text-align: center; font-size: 11px; opacity: 0.7; }
+      </style>
+    </head>
+    <body>
+      <h2>CHAFU MATCHA</h2>
+      <div class="meta">${rec.time}<br/>Kasir: ${rec.cashier}</div>
+      <hr/>
+      <table>${rows}</table>
+      <hr/>
+      <table>
+        <tr><td>Subtotal</td><td style="text-align:right">${rec.subtotal.toLocaleString("id-ID")}</td></tr>
+        ${rec.discount ? <tr><td>Diskon</td><td style="text-align:right">-${rec.discount.toLocaleString("id-ID")}</td></tr> : ""}
+        <tr><td>Total</td><td style="text-align:right">${rec.total.toLocaleString("id-ID")}</td></tr>
+        <tr><td>Tunai</td><td style="text-align:right">${rec.cash.toLocaleString("id-ID")}</td></tr>
+        <tr><td>Kembali</td><td style="text-align:right">${rec.change.toLocaleString("id-ID")}</td></tr>
+      </table>
+      <p class="meta">Terima kasih! 🍵<br/>Follow @chafumatcha</p>
+      <script>window.print()</script>
+    </body>
+    </html>
+  `;
+
+  w.document.write(html);
+  w.document.close();
+}
   async function login() {
     try {
       await signInWithEmailAndPassword(auth, email, pass);
@@ -182,7 +263,7 @@ const DEFAULT_PRODUCTS: Product[] = [
               ))}
             </div>
           </section>
-
+      
           <section className="section">
             <h2>Keranjang</h2>
             {cart.map((c) => (
@@ -215,7 +296,29 @@ const DEFAULT_PRODUCTS: Product[] = [
           </section>
         </main>
       )}
-
+{tab === "riwayat" && (
+  <main className="section">
+    <h2>Riwayat Transaksi</h2>
+    {sales.length === 0 ? (
+      <p>Belum ada transaksi.</p>
+    ) : (
+      <table>
+        <thead>
+          <tr><th>Waktu</th><th>Item</th><th>Total</th></tr>
+        </thead>
+        <tbody>
+          {sales.map((s, i) => (
+            <tr key={i}>
+              <td>{s.time}</td>
+              <td>{s.items.map(it => ${it.name} x${it.qty}).join(", ")}</td>
+              <td>{s.total.toLocaleString("id-ID")}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    )}
+  </main>
+)}
       {tab === "produk" && (
         <main className="section">
           <h2>Manajemen Produk</h2>
