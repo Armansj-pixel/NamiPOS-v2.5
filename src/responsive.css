@@ -1,0 +1,39 @@
+:root { --gap: 20px; }
+
+/* Shell dasar */
+.app { min-height: 100vh; background: #f6f7f6; }
+.header { padding: 16px 20px; border-bottom: 2px solid #2e7d32;
+  display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.tabs { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* Grid halaman POS */
+.pos-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; padding: 20px; }
+.section { background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 14px; }
+.section h2 { margin-top: 0; }
+
+.product-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.button-tap { min-height: 44px; } /* target sentuh nyaman */
+
+/* Tablet */
+@media (max-width: 900px) {
+  .pos-grid { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
+  .section h2 { font-size: 18px; }
+  .product-grid { grid-template-columns: 1fr 1fr; }
+  .btn { padding: 12px 14px; font-size: 16px; }
+}
+
+/* HP kecil */
+@media (max-width: 520px) {
+  .product-grid { grid-template-columns: 1fr; }
+  .qr-img { width: 80vw; height: auto; }
+
+  /* Pay bar tetap di bawah untuk aksi cepat */
+  .fixed-paybar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    background: #fff; border-top: 1px solid #ddd; padding: 10px 12px;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+  .paybar-total { font-weight: 700; }
+  .paybar-spacer { height: 64px; } /* beri ruang agar konten tidak tertutup bar */
+}
