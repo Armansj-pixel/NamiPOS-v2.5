@@ -1,3 +1,4 @@
+import "./responsive.css";
 import React, { useEffect, useMemo, useState } from "react";
 import { db, fetchProducts, upsertProduct, removeProduct, addSale } from "./lib/firebase";
 
