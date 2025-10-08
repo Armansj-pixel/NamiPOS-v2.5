@@ -226,3 +226,10 @@ export async function adjustStock(adjs: { ingredientId: string; newStock: number
 
   await batch.commit();
 }
+useEffect(() => {
+  const q = query(collection(db, "sales"), orderBy("createdAt", "desc"));
+  const unsub = onSnapshot(q, (snap) => {
+    setSales(snap.docs.map(d => d.data()));
+  });
+  return () => unsub();
+}, []);
