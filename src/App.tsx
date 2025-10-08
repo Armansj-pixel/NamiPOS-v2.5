@@ -284,10 +284,14 @@ function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredien
     onChange(await fetchIngredients());
   }
 
-  async function adjustItem(i: InvIngredient, d: number) {
-    await adjustStock(i.id!, d);
-    onChange(await fetchIngredients());
-  }
+async function adjustItem(i: InvIngredient, delta: number) {
+  const current = Number(i.stock || 0);
+  const newStock = current + delta;
+  // panggil sesuai signature adjustStock(adjs[])
+  await adjustStock([{ ingredientId: String(i.id), newStock, note: delta > 0 ? `+${delta}` : `${delta}` }]);
+  onChange(await fetchIngredients());
+}
+
 
   return (
     <div>
@@ -313,29 +317,46 @@ function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredien
   );
 }
 
-function RecipeManager({ products, ingredients, recipes, onChange }: {
-  products: Product[]; ingredients: InvIngredient[]; recipes: RecipeDoc[]; onChange: (x: RecipeDoc[]) => void;
+function RecipeManager({
+  products,
+  ingredients,
+  recipes,
+  onChange,
+}: {
+  products: Product[];
+  ingredients: InvIngredient[];
+  recipes: RecipeDoc[];
+  onChange: (x: RecipeDoc[]) => void;
 }) {
   const [selected, setSelected] = useState<number>(0);
-  const [temp, setTemp] = useState<{ [key: string]: number }>({});
+  // gunakan map sederhana untuk form: ingredientId -> qty
+  const [temp, setTemp] = useState<{ [ingredientId: string]: number }>({});
 
+  // saat ganti produk, muat resepnya lalu konversi array -> map
   useEffect(() => {
     const found = recipes.find((r) => r.productId === selected);
-    if (found && Array.isArray(found.items)) {
-      const map: { [key: string]: number } = {};
-      for (const item of found.items as any[]) {
-        if (item.ingredientId) map[item.ingredientId] = item.amount || 0;
-      }
-      setTemp(map);
-    } else {
-      setTemp((found?.items as any) || {});
+    if (!found) {
+      setTemp({});
+      return;
     }
+    // RecipeDoc.items adalah RecipeItem[] { ingredientId, qty }
+    const map: { [id: string]: number } = {};
+    for (const it of (found.items || [])) {
+      if (it.ingredientId) map[it.ingredientId] = Number(it.qty || 0);
+    }
+    setTemp(map);
   }, [selected, recipes]);
 
   async function saveRecipe() {
     if (!selected) return alert("Pilih produk terlebih dahulu!");
-    const cleanItems = Object.fromEntries(Object.entries(temp).filter(([_, v]) => v && v > 0));
-    await setRecipeForProduct({ productId: selected, items: cleanItems });
+    // konversi map -> array RecipeItem[]
+    const items = Object.entries(temp)
+      .filter(([, qty]) => (qty || 0) > 0)
+      .map(([ingredientId, qty]) => ({ ingredientId, qty }));
+
+    // panggil sesuai signature: (productId, items)
+    await setRecipeForProduct(selected, items);
+
     const updated = await fetchRecipes();
     onChange(updated);
     alert("Resep disimpan!");
@@ -346,7 +367,11 @@ function RecipeManager({ products, ingredients, recipes, onChange }: {
       <h3>Pilih Produk</h3>
       <select value={selected} onChange={(e) => setSelected(Number(e.target.value))}>
         <option value={0}>-- pilih --</option>
-        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        {products.map((p) => (
+          <option key={p.id} value={p.id}>
+            {p.name}
+          </option>
+        ))}
       </select>
 
       {selected !== 0 && (
@@ -357,12 +382,17 @@ function RecipeManager({ products, ingredients, recipes, onChange }: {
               <label style={{ flex: 1 }}>{i.name}</label>
               <input
                 type="number"
-                style={{ width: 80 }}
-                placeholder="Jumlah"
-                value={temp[i.id!] || ""}
-                onChange={(e) => setTemp({ ...temp, [i.id!]: Number(e.target.value) })}
+                style={{ width: 90 }}
+                placeholder="Qty per gelas"
+                value={temp[i.id!] ?? ""}
+                onChange={(e) =>
+                  setTemp({
+                    ...temp,
+                    [String(i.id)]: Number(e.target.value) || 0,
+                  })
+                }
               />
-              <small style={{ marginLeft: 4 }}>{i.unit}</small>
+              <small style={{ marginLeft: 6 }}>{i.unit}</small>
             </div>
           ))}
           <button onClick={saveRecipe} className="btn">Simpan Resep</button>
