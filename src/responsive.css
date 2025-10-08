@@ -1,39 +1,117 @@
-:root { --gap: 20px; }
+:root { --gap: 20px; --brand: #2e7d32; --border: #e6e6e6; --muted: #777; }
 
-/* Shell dasar */
+* { box-sizing: border-box; }
+
 .app { min-height: 100vh; background: #f6f7f6; }
-.header { padding: 16px 20px; border-bottom: 2px solid #2e7d32;
-  display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-.tabs { display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* Grid halaman POS */
-.pos-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; max-width: 1200px; margin: 0 auto; padding: 20px; }
-.section { background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 14px; }
+/* Header */
+.header {
+  padding: 16px 20px;
+  border-bottom: 2px solid var(--brand);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.header h1 { margin: 0; color: var(--brand); font-size: 20px; }
+
+/* Tabs (simple) */
+.tabs { display: flex; gap: 8px; padding: 12px 20px; flex-wrap: wrap; }
+.tabs > button {
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.tabs > button.active,
+.tabs > button:focus {
+  border: 2px solid var(--brand);
+}
+
+/* Sections and grids */
+.section {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin: 12px 20px;
+}
 .section h2 { margin-top: 0; }
 
-.product-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pos-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  max-width: 1200px;
+  margin: 0 auto 20px;
+  padding: 0 20px 20px;
+}
+
+/* Product grid */
+.product-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.btn {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: pointer;
+}
+.button-tap { min-height: 44px; }
+
+/* Tables scroll */
 .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.button-tap { min-height: 44px; } /* target sentuh nyaman */
+
+/* QR image */
+.qr-img { width: 260px; height: 260px; object-fit: contain; border: 1px solid #eee; border-radius: 8px; }
+
+/* Paybar fixed (mobile) */
+.fixed-paybar {
+  display: none;
+}
+.paybar-total { font-weight: 700; }
+.paybar-spacer { height: 0; }
+
+/* =========== Responsive =========== */
 
 /* Tablet */
 @media (max-width: 900px) {
-  .pos-grid { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
-  .section h2 { font-size: 18px; }
+  .pos-grid { grid-template-columns: 1fr; gap: 12px; padding: 0 12px 12px; }
   .product-grid { grid-template-columns: 1fr 1fr; }
   .btn { padding: 12px 14px; font-size: 16px; }
+  .section { margin: 12px; }
 }
 
-/* HP kecil */
+/* Phone */
 @media (max-width: 520px) {
   .product-grid { grid-template-columns: 1fr; }
   .qr-img { width: 80vw; height: auto; }
-
-  /* Pay bar tetap di bawah untuk aksi cepat */
   .fixed-paybar {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
-    background: #fff; border-top: 1px solid #ddd; padding: 10px 12px;
-    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    display: flex;
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 40;
+    background: #fff;
+    border-top: 1px solid var(--border);
+    padding: 10px 12px;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
   }
-  .paybar-total { font-weight: 700; }
   .paybar-spacer { height: 64px; } /* beri ruang agar konten tidak tertutup bar */
 }
+
+/* Small helpers */
+input, select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+}
+hr { border: none; border-top: 1px dashed #ddd; margin: 10px 0; }
+small { color: var(--muted); }
