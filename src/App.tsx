@@ -1,13 +1,13 @@
-// src/App.tsx — CHAFU MATCHA POS FINAL (Versi Admin + Inventory + Responsive)
+// src/App.tsx — CHAFU MATCHA POS FINAL (versi lengkap + TypeScript fix)
 // -----------------------------------------------------------------------------
-// Author: Arman Dion Sakti
+// Author: Arman Dion Sakti (Elsewedy Electric Indonesia)
 // Date: 08 Oktober 2025
 // -----------------------------------------------------------------------------
 // ✅ Login Firebase (Email/Password)
 // ✅ POS Kasir (Tunai + QR E-Wallet)
-// ✅ Inventory + Resep + Stok opname
+// ✅ Inventory + Resep + Stok opname otomatis
 // ✅ Dashboard Riwayat
-// ✅ Responsif otomatis di HP
+// ✅ Responsive otomatis di HP
 // ✅ Admin email: antonius.arman123@gmail.com, ayuismaalabibbah@gmail.com
 // -----------------------------------------------------------------------------
 
@@ -103,7 +103,12 @@ export default function App() {
       change,
     };
     addSale(sale);
-    deductStockForSale({ saleId: sale.id, items: cart, recipes, ingredientsMap: Object.fromEntries(ingredients.map(i => [i.id!, i])) });
+    deductStockForSale({
+      saleId: sale.id,
+      items: cart,
+      recipes,
+      ingredientsMap: Object.fromEntries(ingredients.map(i => [i.id!, i])),
+    });
     setCart([]);
     alert("Transaksi selesai!");
   }
@@ -134,14 +139,12 @@ export default function App() {
     );
 
   return (
-    <div className="app" style={{ fontFamily: "Poppins, system-ui, sans-serif" }}>
+    <div className="app">
       <header className="header">
         <h1>CHAFU MATCHA POS</h1>
-        <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={logout} style={{ background: "#e53935", color: "#fff", border: "none", borderRadius: 8, padding: "6px 14px" }}>
-            Logout
-          </button>
-        </div>
+        <button onClick={logout} style={{ background: "#e53935", color: "#fff", border: "none", borderRadius: 8, padding: "6px 14px" }}>
+          Logout
+        </button>
       </header>
 
       <div className="tabs">
@@ -202,7 +205,7 @@ export default function App() {
         </main>
       )}
 
-            {tab === "produk" && (
+      {tab === "produk" && (
         <main className="section">
           <h2>Manajemen Produk</h2>
           <ProductManager products={products} onChange={setProducts} />
@@ -219,28 +222,16 @@ export default function App() {
       {tab === "resep" && (
         <main className="section">
           <h2>Resep Produk</h2>
-          <RecipeManager
-            products={products}
-            ingredients={ingredients}
-            recipes={recipes}
-            onChange={setRecipes}
-          />
+          <RecipeManager products={products} ingredients={ingredients} recipes={recipes} onChange={setRecipes} />
         </main>
       )}
     </div>
   );
 }
 
-/* ============================
-   Komponen: ProductManager
-   ============================ */
-function ProductManager({
-  products,
-  onChange,
-}: {
-  products: Product[];
-  onChange: (x: Product[]) => void;
-}) {
+/* ---------- Subkomponen: Product, Inventory, Recipe ---------- */
+
+function ProductManager({ products, onChange }: { products: Product[]; onChange: (x: Product[]) => void }) {
   const [form, setForm] = useState<Product>({ id: 0, name: "", price: 0, active: true });
 
   async function save() {
@@ -277,16 +268,7 @@ function ProductManager({
   );
 }
 
-/* ============================
-   Komponen: InventoryManager
-   ============================ */
-function InventoryManager({
-  ingredients,
-  onChange,
-}: {
-  ingredients: InvIngredient[];
-  onChange: (x: InvIngredient[]) => void;
-}) {
+function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredient[]; onChange: (x: InvIngredient[]) => void }) {
   const [form, setForm] = useState<InvIngredient>({ name: "", unit: "", stock: 0 });
 
   async function save() {
@@ -302,7 +284,7 @@ function InventoryManager({
     onChange(await fetchIngredients());
   }
 
-  async function adjust(i: InvIngredient, d: number) {
+  async function adjustItem(i: InvIngredient, d: number) {
     await adjustStock(i.id!, d);
     onChange(await fetchIngredients());
   }
@@ -320,8 +302,8 @@ function InventoryManager({
         <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <span>{i.name} ({i.stock} {i.unit})</span>
           <div>
-            <button onClick={() => adjust(i, 1)}>+1</button>
-            <button onClick={() => adjust(i, -1)}>-1</button>
+            <button onClick={() => adjustItem(i, 1)}>+1</button>
+            <button onClick={() => adjustItem(i, -1)}>-1</button>
             <button onClick={() => setForm(i)}>Edit</button>
             <button onClick={() => del(i)}>Hapus</button>
           </div>
@@ -331,34 +313,31 @@ function InventoryManager({
   );
 }
 
-/* ============================
-   Komponen: RecipeManager
-   ============================ */
-function RecipeManager({
-  products,
-  ingredients,
-  recipes,
-  onChange,
-}: {
-  products: Product[];
-  ingredients: InvIngredient[];
-  recipes: RecipeDoc[];
-  onChange: (x: RecipeDoc[]) => void;
+function RecipeManager({ products, ingredients, recipes, onChange }: {
+  products: Product[]; ingredients: InvIngredient[]; recipes: RecipeDoc[]; onChange: (x: RecipeDoc[]) => void;
 }) {
   const [selected, setSelected] = useState<number>(0);
-  const [current, setCurrent] = useState<RecipeDoc | null>(null);
   const [temp, setTemp] = useState<{ [key: string]: number }>({});
 
   useEffect(() => {
     const found = recipes.find((r) => r.productId === selected);
-    setCurrent(found || null);
-    setTemp(found?.items || {});
+    if (found && Array.isArray(found.items)) {
+      const map: { [key: string]: number } = {};
+      for (const item of found.items as any[]) {
+        if (item.ingredientId) map[item.ingredientId] = item.amount || 0;
+      }
+      setTemp(map);
+    } else {
+      setTemp((found?.items as any) || {});
+    }
   }, [selected, recipes]);
 
   async function saveRecipe() {
     if (!selected) return alert("Pilih produk terlebih dahulu!");
-    await setRecipeForProduct({ productId: selected, items: temp });
-    onChange(await fetchRecipes());
+    const cleanItems = Object.fromEntries(Object.entries(temp).filter(([_, v]) => v && v > 0));
+    await setRecipeForProduct({ productId: selected, items: cleanItems });
+    const updated = await fetchRecipes();
+    onChange(updated);
     alert("Resep disimpan!");
   }
 
@@ -367,11 +346,7 @@ function RecipeManager({
       <h3>Pilih Produk</h3>
       <select value={selected} onChange={(e) => setSelected(Number(e.target.value))}>
         <option value={0}>-- pilih --</option>
-        {products.map((p) => (
-          <option key={p.id} value={p.id}>
-            {p.name}
-          </option>
-        ))}
+        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
       </select>
 
       {selected !== 0 && (
@@ -385,37 +360,14 @@ function RecipeManager({
                 style={{ width: 80 }}
                 placeholder="Jumlah"
                 value={temp[i.id!] || ""}
-                onChange={(e) =>
-                  setTemp({
-                    ...temp,
-                    [i.id!]: Number(e.target.value),
-                  })
-                }
+                onChange={(e) => setTemp({ ...temp, [i.id!]: Number(e.target.value) })}
               />
               <small style={{ marginLeft: 4 }}>{i.unit}</small>
             </div>
           ))}
-          <button onClick={saveRecipe} className="btn">
-            Simpan Resep
-          </button>
+          <button onClick={saveRecipe} className="btn">Simpan Resep</button>
         </>
       )}
     </div>
   );
 }
-
-/* ============================
-   Integrasi Otomatis POS -> Inventory
-   ============================ */
-// Keterangan:
-// Saat transaksi diselesaikan di POS (finalizeSale),
-// fungsi `deductStockForSale()` otomatis dipanggil.
-// Ia akan mencari resep dari setiap produk,
-// lalu mengurangi stok bahan sesuai jumlah produk yang dijual.
-//
-// Contoh:
-// Produk “Matcha OG” punya resep { Matcha Powder: 5gr, Susu: 150ml }
-// Saat terjual 2 cup → stok berkurang Matcha Powder -10gr, Susu -300ml
-//
-// Fungsi ini diambil dari file ./lib/firebase.ts
-// dan sudah aktif otomatis di finalizeSale() Part 1.
