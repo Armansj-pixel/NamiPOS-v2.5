@@ -82,6 +82,17 @@ export default function App() {
       return [...c, { id: Math.random().toString(36).slice(2, 9), productId: p.id, name: p.name, price: p.price, qty: 1 }];
     });
   }
+// --- DEFAULT SEED PRODUCTS (1x saat kosong) ---
+const DEFAULT_PRODUCTS: Product[] = [
+  { id: 1, name: "Matcha OG", price: 15000, active: true },
+  { id: 2, name: "Matcha Cloud", price: 18000, active: true },
+  { id: 3, name: "Strawberry Cream Matcha", price: 17000, active: true },
+  { id: 4, name: "Choco Matcha", price: 17000, active: true },
+  { id: 5, name: "Matcha Cookies", price: 17000, active: true },
+  { id: 6, name: "Honey Matcha", price: 18000, active: true },
+  { id: 7, name: "Coconut Matcha", price: 18000, active: true },
+  { id: 8, name: "Orange Matcha", price: 17000, active: true },
+];
 
   function finalizeSale() {
     if (!cart.length) return alert("Keranjang kosong!");
