@@ -1,24 +1,21 @@
-// src/App.tsx — CHAFU MATCHA POS (FINAL 80mm)
-// ------------------------------------------------------------------------------------
+// src/App.tsx — CHAFU MATCHA POS (FINAL 80mm, lengkap)
+// ------------------------------------------------------------------------------------------------
 // Fitur:
 // - Login Firebase (Email/Password) — admin tab by email
 // - POS: Tunai + E-Wallet (QR otomatis), cetak struk auto (thermal 80mm)
 // - Inventory (bahan), Resep (auto deduct stok saat transaksi)
 // - Riwayat transaksi (live Firestore, admin only)
 // - Dashboard Laporan (omzet, trx, AOV, top produk, stok rendah, rentang tanggal)
-// - Loyalty: Earn & Redeem poin by No HP (1 poin / Rp10.000, 1 poin = Rp100; bisa diubah di settings)
+// - Loyalty: Earn & Redeem poin by No HP (aturan via settings/global)
 // - Shift Kasir: Buka/Tutup shift, rekap per metode bayar, export CSV
 // - Export CSV (Riwayat/Laporan), Export PDF ringkas (Laporan), Reorder CSV (stok kritis)
-// ------------------------------------------------------------------------------------
-// Kebutuhan:
+// ------------------------------------------------------------------------------------------------
+// Syarat:
 // - /public/qr-qris.png untuk QR e-wallet
-// - ENV Firebase (VITE_FIREBASE_*) sudah dihosting (Netlify/Vercel)
-// - file ./lib/firebase.ts sudah yang terbaru (CRUD produk/ingredients/recipes + deductStockForSale)
-// - ./responsive.css untuk styling dasar (optional)
+// - ENV Firebase (VITE_FIREBASE_*) sudah terpasang
+// - file ./lib/firebase.ts versi terbaru (sudah kamu pakai)
 
 import React, { useEffect, useState } from "react";
-import "./responsive.css";
-
 import {
   db,
   fetchProducts, upsertProduct, removeProduct,
@@ -557,12 +554,12 @@ export default function App() {
   // ---------- Auth UI ----------
   async function login() {
     try {
-      await signInWithEmailAndPassword(auth, email, pass);
+      await signInWithEmailAndPassword(getAuth(), email, pass);
     } catch (e: any) {
       alert("Login gagal: " + e.message);
     }
   }
-  async function logout() { await signOut(auth); }
+  async function logout() { await signOut(getAuth()); }
 
   if (!user)
     return (
@@ -578,8 +575,8 @@ export default function App() {
 
   // ---------- Main UI ----------
   return (
-    <div className="app">
-      <header className="header">
+    <div className="app" style={{ padding: 12 }}>
+      <header className="header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <h1>CHAFU MATCHA POS</h1>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => setTab("pos")} className="btn">POS</button>
@@ -602,13 +599,13 @@ export default function App() {
 
       {/* POS */}
       {tab === "pos" && (
-        <main className="pos-grid">
+        <main className="pos-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           {/* Menu */}
-          <section className="section">
+          <section className="section" style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
             <h2>Menu</h2>
-            <div className="product-grid">
+            <div className="product-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
               {products.filter(p => p.active !== false).map((p) => (
-                <button key={p.id} onClick={() => addToCart(p)} className="btn button-tap">
+                <button key={p.id} onClick={() => addToCart(p)} className="btn" style={{ textAlign: "left", border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
                   <div>{p.name}</div>
                   <small>{IDR(p.price)}</small>
                 </button>
@@ -617,7 +614,7 @@ export default function App() {
           </section>
 
           {/* Keranjang */}
-          <section className="section">
+          <section className="section" style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
             <h2>Keranjang</h2>
 
             {/* Loyalty + katalog */}
@@ -659,9 +656,9 @@ export default function App() {
               )}
             </div>
 
-            {cart.length === 0 && <p>Belum ada item.</p>}
+            {cart.length === 0 && <p style={{ marginTop: 8 }}>Belum ada item.</p>}
             {cart.map((c) => (
-              <div key={c.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 8, alignItems: "center", marginBottom: 6 }}>
+              <div key={c.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 8, alignItems: "center", margin: "6px 0" }}>
                 <div>{c.name} <small>x{c.qty}</small></div>
                 <div>{IDR(c.price * c.qty)}</div>
                 <div>
@@ -691,7 +688,7 @@ export default function App() {
                 </>
               ) : (
                 <div style={{ textAlign: "center" }}>
-                  <img className="qr-img" src={walletQR[payMethod]} alt="QR" />
+                  <img className="qr-img" src={walletQR[payMethod]} alt="QR" style={{ maxWidth: 240 }} />
                   <p>Scan untuk bayar ({payMethod})</p>
                 </div>
               )}
@@ -709,7 +706,7 @@ export default function App() {
 
       {/* Produk */}
       {tab === "produk" && isAdmin && (
-        <main className="section">
+        <main className="section" style={{ marginTop: 12 }}>
           <h2>Manajemen Produk</h2>
           <ProductManager products={products} onChange={setProducts} />
         </main>
@@ -717,7 +714,7 @@ export default function App() {
 
       {/* Inventory */}
       {tab === "inventori" && isAdmin && (
-        <main className="section">
+        <main className="section" style={{ marginTop: 12 }}>
           <h2>Inventory Bahan</h2>
           <InventoryManager ingredients={ingredients} onChange={setIngredients} />
         </main>
@@ -725,7 +722,7 @@ export default function App() {
 
       {/* Resep */}
       {tab === "resep" && isAdmin && (
-        <main className="section">
+        <main className="section" style={{ marginTop: 12 }}>
           <h2>Resep Produk</h2>
           <RecipeManager
             products={products}
@@ -738,7 +735,7 @@ export default function App() {
 
       {/* Riwayat */}
       {tab === "riwayat" && isAdmin && (
-        <main className="section table-scroll">
+        <main className="section table-scroll" style={{ marginTop: 12 }}>
           <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
             <h2>Riwayat Transaksi</h2>
             <button className="btn" onClick={exportSalesCSV}>Export CSV</button>
@@ -772,7 +769,7 @@ export default function App() {
 
       {/* Laporan */}
       {tab === "laporan" && isAdmin && (
-        <main className="section">
+        <main className="section" style={{ marginTop: 12 }}>
           <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
             <h2>Dashboard Laporan</h2>
             <div style={{display:"flex", gap:8}}>
@@ -854,316 +851,195 @@ function ProductManager({ products, onChange }: { products: Product[]; onChange:
 
   return (
     <div>
-      <div style={{ display: "
-      // src/App.tsx — CHAFU MATCHA POS FINAL BUILD (Firebase + Inventory + Loyalty + Shift)
-import React, { useState, useEffect } from "react";
-import { db, auth } from "./lib/firebase";
-import {
-  addDoc, setDoc, updateDoc, getDoc, getDocs, deleteDoc,
-  collection, doc, query, where, orderBy, serverTimestamp
-} from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
-
-// ============================
-// 🔹 UTILS
-// ============================
-const IDR = (n: number) =>
-  new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
-const uid = () => Math.random().toString(36).slice(2, 9);
-const todayYMD = () => new Date().toISOString().slice(0, 10);
-const nowStr = () => new Date().toLocaleString("id-ID", { hour12: false });
-
-// ============================
-// 🔹 TYPES
-// ============================
-interface Product { id: string; name: string; price: number; category: string; active?: boolean; }
-interface Ingredient { id: string; name: string; stock: number; unit: string; minStock?: number; }
-interface RecipeItem { ingredientId: string; qty: number; }
-interface SaleItem { productId: string; name: string; qty: number; price: number; }
-interface SaleRow {
-  id?: string; time: string; timeMs: number; cashier: string;
-  items: SaleItem[]; subtotal: number; discount: number; total: number;
-  payMethod: string; cash: number; change: number; createdAt?: any;
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+        <input placeholder="ID (unik angka)" type="number" value={form.id || ""} onChange={(e) => setForm({ ...form, id: Number(e.target.value) })} />
+        <input placeholder="Nama" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <input placeholder="Harga" type="number" value={form.price || 0} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} />
+        <button className="btn" onClick={save}>Simpan</button>
+      </div>
+      {products.map((p) => (
+        <div key={p.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+          <span>{p.name} — {IDR(p.price)}</span>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn" onClick={() => setForm(p)}>Edit</button>
+            <button className="btn" onClick={() => del(p)}>Hapus</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
-// ============================
-// 🔹 MAIN APP
-// ============================
-export default function App() {
-  const [user, setUser] = useState<any>(null);
-  const [loginEmail, setLoginEmail] = useState("");
-  const [loginPass, setLoginPass] = useState("");
-  const [tab, setTab] = useState("pos");
-  const [products, setProducts] = useState<Product[]>([]);
-  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  const [cart, setCart] = useState<SaleItem[]>([]);
-  const [sales, setSales] = useState<SaleRow[]>([]);
-  const [discount, setDiscount] = useState(0);
-  const [cash, setCash] = useState(0);
-  const [payMethod, setPayMethod] = useState("Tunai");
+function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredient[]; onChange: (x: InvIngredient[]) => void }) {
+  const [form, setForm] = useState<InvIngredient>({ name: "", unit: "", stock: 0 });
 
-  // Loyalty
-  const [customerPhone, setCustomerPhone] = useState("");
-  const [customerName, setCustomerName] = useState("");
-  const [customerPoints, setCustomerPoints] = useState<number | null>(null);
-  const [usePoints, setUsePoints] = useState(0);
-  const [settings, setSettings] = useState({
-    pointEarnPerRp: 10000,
-    pointValueRp: 100,
-    lowStockThreshold: 10
-  });
+  async function save() {
+    if (!form.name) return alert("Nama bahan wajib diisi!");
+    await upsertIngredient(form);
+    onChange(await fetchIngredients());
+    setForm({ name: "", unit: "", stock: 0 });
+  }
 
-  // Shift
-  const [activeShift, setActiveShift] = useState<any>(null);
+  async function del(i: InvIngredient) {
+    if (!confirm(`Hapus ${i.name}?`)) return;
+    await deleteIngredient(i.id!);
+    onChange(await fetchIngredients());
+  }
 
-  // ============================
-  // AUTH
-  // ============================
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => setUser(u));
-    return () => unsub();
-  }, []);
-
-  const login = async () => {
-    try {
-      await signInWithEmailAndPassword(auth, loginEmail, loginPass);
-      alert("Login berhasil!");
-    } catch (e: any) {
-      alert("Gagal login: " + e.message);
-    }
-  };
-  const logout = async () => {
-    await signOut(auth);
-    setUser(null);
-  };
-
-  // ============================
-  // LOAD DATA
-  // ============================
-  useEffect(() => {
-    if (!user) return;
-    const load = async () => {
-      const ps = await getDocs(collection(db, "products"));
-      setProducts(ps.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-      const ing = await getDocs(collection(db, "ingredients"));
-      setIngredients(ing.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-      const sl = await getDocs(query(collection(db, "sales"), orderBy("timeMs", "desc")));
-      setSales(sl.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
-    };
-    load();
-  }, [user]);
-
-  // ============================
-  // CART ACTIONS
-  // ============================
-  const addToCart = (p: Product) => {
-    setCart((prev) => {
-      const found = prev.find((x) => x.productId === p.id);
-      if (found) return prev.map((x) => x === found ? { ...x, qty: x.qty + 1 } : x);
-      return [...prev, { productId: p.id, name: p.name, price: p.price, qty: 1 }];
-    });
-  };
-  const inc = (id: string) => setCart((p) => p.map((x) => x.productId === id ? { ...x, qty: x.qty + 1 } : x));
-  const dec = (id: string) => setCart((p) => p.map((x) => x.productId === id ? { ...x, qty: Math.max(1, x.qty - 1) } : x));
-  const rm = (id: string) => setCart((p) => p.filter((x) => x.productId !== id));
-
-  const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
-  const total = Math.max(0, subtotal - discount - (usePoints * settings.pointValueRp));
-  const change = Math.max(0, cash - total);
-
-  // ============================
-  // LOYALTY
-  // ============================
-  const fetchCustomer = async (phone: string) => {
-    if (!phone) return;
-    const ref = doc(db, "customers", phone);
-    const snap = await getDoc(ref);
-    setCustomerPoints(snap.exists() ? (snap.data() as any).points || 0 : 0);
-  };
-  useEffect(() => { fetchCustomer(customerPhone); }, [customerPhone]);
-
-  const calcEarnedPoints = (total: number) => Math.floor(total / settings.pointEarnPerRp);
-
-  const addLoyalty = async (phone: string, earned: number) => {
-    if (!phone || earned <= 0) return;
-    const ref = doc(db, "customers", phone);
-    const snap = await getDoc(ref);
-    const base = snap.exists() ? (snap.data() as any) : { points: 0, name: customerName };
-    await setDoc(ref, {
-      ...base,
-      name: customerName || base.name,
-      points: (base.points || 0) + earned
-    }, { merge: true });
-  };
-  const redeemLoyalty = async (phone: string, pts: number) => {
-    if (!phone || pts <= 0) return;
-    const ref = doc(db, "customers", phone);
-    const snap = await getDoc(ref);
-    const base = snap.exists() ? (snap.data() as any) : { points: 0 };
-    await updateDoc(ref, { points: Math.max(0, (base.points || 0) - pts) });
-  };
-
-  // ============================
-  // FINALIZE SALE
-  // ============================
-  const finalize = async () => {
-    if (!cart.length) return alert("Keranjang kosong!");
-    if (payMethod === "Tunai" && cash < total) return alert("Uang kurang!");
-
-    const earned = calcEarnedPoints(total);
-    const sale: SaleRow = {
-      time: nowStr(),
-      timeMs: Date.now(),
-      cashier: user?.email || "-",
-      items: cart,
-      subtotal,
-      discount: discount + (usePoints * settings.pointValueRp),
-      total,
-      payMethod,
-      cash,
-      change,
-      createdAt: serverTimestamp()
-    };
-    const ref = await addDoc(collection(db, "sales"), sale);
-
-    if (customerPhone) {
-      if (usePoints > 0) await redeemLoyalty(customerPhone, usePoints);
-      if (earned > 0) await addLoyalty(customerPhone, earned);
-    }
-
-    printReceipt({ ...sale, id: ref.id });
-    setCart([]); setCash(0); setDiscount(0); setUsePoints(0);
-    alert("Transaksi berhasil!");
-  };
-
-  // ============================
-  // PRINT RECEIPT (80mm)
-  // ============================
-  const printReceipt = (rec: any) => {
-    const w = window.open("", "_blank", "width=380,height=600");
-    if (!w) return;
-    const itemsHtml = rec.items.map((i: any) =>
-      `<tr><td>${i.name}</td><td>${i.qty}x</td><td style='text-align:right'>${IDR(i.price * i.qty)}</td></tr>`
-    ).join("");
-    w.document.write(`
-      <html><head><title>Struk</title>
-      <style>
-        @media print {@page { size: 80mm auto; margin: 0; }}
-        body { font-family: monospace; margin:0; }
-        .wrap { width: 76mm; margin:auto; padding:3mm; }
-        h2 { text-align:center; margin:4px 0; }
-        table { width:100%; border-collapse:collapse; }
-        td { padding:2px 0; border-bottom:1px dashed #aaa; font-size:12px; }
-        .tot td { font-weight:700; border-bottom:none; }
-        .meta { font-size:11px; text-align:center; margin-top:8px; }
-      </style></head><body>
-      <div class='wrap'>
-        <h2>CHAFU MATCHA</h2>
-        <div class='meta'>${rec.id || ""}<br>${rec.time}</div>
-        <table>${itemsHtml}
-          <tr class='tot'><td>Subtotal</td><td></td><td>${IDR(rec.subtotal)}</td></tr>
-          ${rec.discount ? `<tr class='tot'><td>Diskon</td><td></td><td>-${IDR(rec.discount)}</td></tr>` : ""}
-          <tr class='tot'><td>Total</td><td></td><td>${IDR(rec.total)}</td></tr>
-          <tr><td>Tunai</td><td></td><td>${IDR(rec.cash)}</td></tr>
-          <tr><td>Kembali</td><td></td><td>${IDR(rec.change)}</td></tr>
-        </table>
-        <div class='meta'>Terima kasih! Follow @chafumatcha</div>
-      </div>
-      <script>window.print()</script>
-      </body></html>
-    `);
-    w.document.close();
-  };
-
-  // ============================
-  // RENDER
-  // ============================
-  if (!user) {
-    return (
-      <div style={{ padding: 40, textAlign: "center" }}>
-        <h2>CHAFU MATCHA POS LOGIN</h2>
-        <input placeholder="Email" value={loginEmail} onChange={(e) => setLoginEmail(e.target.value)} /><br />
-        <input placeholder="Password" type="password" value={loginPass} onChange={(e) => setLoginPass(e.target.value)} /><br />
-        <button onClick={login}>Login</button>
-      </div>
-    );
+  async function adjustItem(i: InvIngredient, delta: number) {
+    const current = Number(i.stock || 0);
+    const newStock = current + delta;
+    await adjustStock([{ ingredientId: String(i.id), newStock, note: delta > 0 ? `+${delta}` : `${delta}` }]);
+    onChange(await fetchIngredients());
   }
 
   return (
-    <div style={{ padding: 12 }}>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h2>Chafu Matcha POS</h2>
-        <div>
-          <span>{user.email}</span>{" "}
-          <button onClick={logout}>Logout</button>
+    <div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+        <input placeholder="Nama bahan" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <input placeholder="Satuan (ml/gr/pcs)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+        <input placeholder="Stok awal" type="number" value={form.stock || 0} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} />
+        <button className="btn" onClick={save}>Simpan</button>
+      </div>
+
+      {ingredients.map((i) => (
+        <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <span>{i.name} ({i.stock} {i.unit})</span>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn" onClick={() => adjustItem(i, 1)}>+1</button>
+            <button className="btn" onClick={() => adjustItem(i, -1)}>-1</button>
+            <button className="btn" onClick={() => setForm(i)}>Edit</button>
+            <button className="btn" onClick={() => del(i)}>Hapus</button>
+          </div>
         </div>
-      </header>
+      ))}
+    </div>
+  );
+}
 
-      <nav style={{ marginTop: 10 }}>
-        <button onClick={() => setTab("pos")}>Kasir</button>
-        <button onClick={() => setTab("history")}>Riwayat</button>
-        <button onClick={() => setTab("report")}>Laporan</button>
-      </nav>
+function RecipeManager({
+  products,
+  ingredients,
+  recipes,
+  onChange,
+}: {
+  products: Product[];
+  ingredients: InvIngredient[];
+  recipes: RecipeDoc[];
+  onChange: (x: RecipeDoc[]) => void;
+}) {
+  const [selected, setSelected] = useState<number>(0);
+  const [temp, setTemp] = useState<{ [ingredientId: string]: number }>({}); // qty per gelas
 
-      {tab === "pos" && (
-        <main style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-          <section style={{ border: "1px solid #ccc", padding: 8 }}>
-            <h3>Menu</h3>
-            {products.map((p) => (
-              <div key={p.id} style={{ borderBottom: "1px solid #ddd", padding: "4px 0", cursor: "pointer" }} onClick={() => addToCart(p)}>
-                {p.name} - {IDR(p.price)}
-              </div>
-            ))}
-          </section>
+  useEffect(() => {
+    const found = recipes.find((r) => r.productId === selected);
+    if (!found) { setTemp({}); return; }
+    const map: { [k: string]: number } = {};
+    for (const it of (found.items || []) as any[]) {
+      if (it.ingredientId) map[it.ingredientId] = Number(it.qty || 0);
+    }
+    setTemp(map);
+  }, [selected, recipes]);
 
-          <section style={{ border: "1px solid #ccc", padding: 8 }}>
-            <h3>Keranjang</h3>
-            {cart.map((c) => (
-              <div key={c.productId} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>{c.name} x{c.qty}</span>
-                <div>
-                  <button onClick={() => dec(c.productId)}>-</button>
-                  <button onClick={() => inc(c.productId)}>+</button>
-                  <button onClick={() => rm(c.productId)}>x</button>
-                </div>
-              </div>
-            ))}
-            <hr />
-            <div>Subtotal: {IDR(subtotal)}</div>
-            <div>Diskon: <input type="number" value={discount} onChange={(e) => setDiscount(Number(e.target.value))} style={{ width: 80 }} /></div>
-            <div>
-              <label>No HP:</label>
-              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
-              <div>Nama: <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} /></div>
-              <div>Poin: {customerPoints ?? "-"}</div>
-              <div>Gunakan Poin: <input type="number" value={usePoints} onChange={(e) => setUsePoints(Number(e.target.value))} /></div>
+  async function saveRecipe() {
+    if (!selected) return alert("Pilih produk dulu!");
+    const items = Object.entries(temp)
+      .filter(([, qty]) => (qty || 0) > 0)
+      .map(([ingredientId, qty]) => ({ ingredientId, qty }));
+    await setRecipeForProduct(selected, items);
+    const updated = await fetchRecipes();
+    onChange(updated);
+    alert("Resep disimpan!");
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <label>Pilih Produk:</label>
+        <select value={selected} onChange={(e) => setSelected(Number(e.target.value))}>
+          <option value={0}>-- pilih --</option>
+          {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </div>
+
+      {selected !== 0 && (
+        <>
+          <h4>Resep per 1 gelas</h4>
+          {ingredients.map((i) => (
+            <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+              <div style={{ flex: 1 }}>{i.name}</div>
+              <input
+                type="number"
+                placeholder="Qty"
+                style={{ width: 90 }}
+                value={temp[i.id!] ?? ""}
+                onChange={(e) =>
+                  setTemp({
+                    ...temp,
+                    [String(i.id)]: Number(e.target.value) || 0,
+                  })
+                }
+              />
+              <small>{i.unit}</small>
             </div>
-            <div>Metode: <select value={payMethod} onChange={(e) => setPayMethod(e.target.value)}>
-              <option>Tunai</option><option>QRIS</option><option>GoPay</option><option>OVO</option><option>DANA</option><option>Transfer</option>
-            </select></div>
-            {payMethod !== "Tunai" && <img src="/qr-qris.png" width={200} alt="QR" />}
-            <div>Total: <b>{IDR(total)}</b></div>
-            {payMethod === "Tunai" && (
-              <div>
-                Uang Tunai: <input type="number" value={cash} onChange={(e) => setCash(Number(e.target.value))} />
-                <div>Kembali: {IDR(change)}</div>
-              </div>
-            )}
-            <button onClick={finalize}>Selesaikan & Cetak</button>
-          </section>
-        </main>
-      )}
-
-      {tab === "history" && (
-        <section>
-          <h3>Riwayat Transaksi</h3>
-          <table border={1} cellPadding={4}>
-            <thead><tr><th>Waktu</th><th>Total</th><th>Kasir</th></tr></thead>
-            <tbody>{sales.map((s) => <tr key={s.id}><td>{s.time}</td><td>{IDR(s.total)}</td><td>{s.cashier}</td></tr>)}</tbody>
-          </table>
-        </section>
+          ))}
+          <button className="btn" onClick={saveRecipe}>Simpan Resep</button>
+        </>
       )}
     </div>
   );
 }
 
+// ---------------- Print 80mm ----------------
+function printReceipt80mm(rec: {
+  time: string; cashier: string;
+  items: { name: string; qty: number; price: number }[];
+  subtotal: number; discount: number;
+  taxRate: number; serviceRate: number;
+  taxValue: number; serviceValue: number;
+  total: number; cash: number; change: number;
+}) {
+  const w = window.open("", "_blank", "width=420,height=700");
+  if (!w) return;
+
+  const rows = rec.items.map(
+    (i) => `<tr>
+      <td>${i.name}</td>
+      <td style='text-align:center'>${i.qty}x</td>
+      <td style='text-align:right'>${(i.price * i.qty).toLocaleString('id-ID')}</td>
+    </tr>`
+  ).join("");
+
+  const html = `
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Struk</title>
+<style>
+  @media print { @page { size: 80mm auto; margin: 0; } body { margin:0; } }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .wrap { width: 76mm; margin: 0 auto; padding: 3mm; }
+  h2 { margin: 4px 0; text-align: center; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 2px 0; font-size: 12px; border-bottom: 1px dashed #ddd; }
+  .tot td { border-bottom: none; font-weight: 700; }
+  .meta { font-size: 11px; text-align: center; opacity: .8; }
+</style></head>
+<body>
+  <div class="wrap">
+    <h2>CHAFU MATCHA</h2>
+    <div class="meta">${new Date().toLocaleString("id-ID", { hour12:false })}<br/>Kasir: ${rec.cashier}</div>
+    <hr/>
+    <table>
+      ${rows}
+      <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${rec.subtotal.toLocaleString("id-ID")}</td></tr>
+      ${rec.discount ? `<tr class="tot"><td>Potongan</td><td></td><td style="text-align:right">-${rec.discount.toLocaleString("id-ID")}</td></tr>` : ""}
+      <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${rec.total.toLocaleString("id-ID")}</td></tr>
+      ${rec.cash ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${rec.cash.toLocaleString("id-ID")}</td></tr>` : ""}
+      ${rec.cash ? `<tr><td>Kembali</td><td></td><td style='text-align:right'>${rec.change.toLocaleString("id-ID")}</td></tr>` : ""}
+    </table>
+    <p class="meta">Terima kasih! Follow @chafumatcha</p>
+  </div>
+  <script>window.print()</script>
+</body></html>`;
+  w.document.write(html);
+  w.document.close();
+}
