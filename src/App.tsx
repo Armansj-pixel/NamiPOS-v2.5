@@ -1,25 +1,7 @@
-// src/App.tsx — CHAFU MATCHA POS ✨ SUPER FINAL (one-file)
-// ===================================================================================
-// Fitur besar (tanpa lib tambahan):
-// - POS: Tunai + E-Wallet (QR otomatis) + print struk 80mm
-// - Inventory + Resep (auto deduct saat transaksi)
-// - Loyalty (earn/redeem), katalog pelanggan, QR loyalty optional
-// - Riwayat realtime, Export CSV
-// - Owner Dashboard (mobile-friendly): KPI, tren harian, top produk, stok kritis
-// - Offline-first: queue transaksi saat offline, auto-sync saat online
-// - Integrasi Google Sheets (opsional via VITE_SHEETS_WEBHOOK)
-// - Multi-outlet: selector outlet, filter dashboard per outlet
-//
-// Kebutuhan file:
-// - public/qr-qris.png   → QR E-Wallet
-// - src/lib/firebase.ts  → sudah versi yang kita pakai sebelumnya (Firestore ready)
-//
-// ENV (Vercel):
-// - VITE_FIREBASE_* (semua yang sudah kamu pakai)
-// - (opsional) VITE_SHEETS_WEBHOOK → URL Apps Script/Webhook untuk log transaksi & stok
-//
-// Catatan: Demi ringkas & stabil di mobile, chart menggunakan <canvas> sederhana.
-// ===================================================================================
+// src/App.tsx — CHAFU MATCHA POS (gabungan perbaikan #1 + #2)
+// - Riwayat: subscribe tanpa index gabungan (filter outlet di memori)
+// - Shift: bisa ditutup walau rekap gagal + rekap tanpa index gabungan
+// - Fitur utama tetap: POS, E-Wallet QR, Inventory, Resep, Loyalty, Laporan, Dashboard, Offline queue
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -67,17 +49,18 @@ const SHEETS_WEBHOOK = (import.meta as any).env?.VITE_SHEETS_WEBHOOK || "";
 function drawLineChart(canvas: HTMLCanvasElement, labels: string[], data: number[]) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  const w = (canvas.width = canvas.clientWidth * (devicePixelRatio || 1));
-  const h = (canvas.height = canvas.clientHeight * (devicePixelRatio || 1));
+  const dpr = (window.devicePixelRatio || 1);
+  const w = (canvas.width = canvas.clientWidth * dpr);
+  const h = (canvas.height = canvas.clientHeight * dpr);
+  ctx.scale(dpr, dpr);
 
-  ctx.clearRect(0, 0, w, h);
-  ctx.scale(devicePixelRatio || 1, devicePixelRatio || 1);
+  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
 
   const pad = 20;
   const innerW = canvas.clientWidth - pad * 2;
   const innerH = canvas.clientHeight - pad * 2;
 
-  const max = Math.max(1, Math.max(...data, 0));
+  const max = Math.max(1, ...data);
   const stepX = data.length > 1 ? innerW / (data.length - 1) : 0;
 
   // grid
@@ -185,7 +168,7 @@ const DEFAULT_SETTINGS: SettingsDoc = {
 };
 
 // -------------- Offline Queue Keys --------------
-const K_PENDING_SALES = "pos.pendingSales.v1"; // antrian transaksi offline
+const K_PENDING_SALES = "pos.pendingSales.v1";
 const K_OUTLET = "pos.outlet.v1";
 
 // ===================================================================================
@@ -222,6 +205,11 @@ export default function App() {
 
   // Riwayat
   const [sales, setSales] = useState<SaleRow[]>([]);
+  // Filter outlet di memori → bisa dipakai global (untuk export juga)
+  const visibleSales = useMemo(
+    () => sales.filter(s => !outletId ? true : (s.outletId || "") === outletId),
+    [sales, outletId]
+  );
 
   // Loyalty + katalog pelanggan
   const [customerPhone, setCustomerPhone] = useState("");
@@ -258,26 +246,30 @@ export default function App() {
         await ensureUserProfile(u);
         await loadSettings();
         await loadData();
-        subscribeSales(); // realtime riwayat
+        subscribeSales(); // realtime riwayat (tanpa index gabungan)
         hydratePendingQueue(); // coba sync jika ada antrian
       }
     });
     return () => unsub();
   }, []);
 
-  // ---------- Subscribe Riwayat ----------
+  // ---------- Subscribe Riwayat (gabungan perbaikan) ----------
   function subscribeSales() {
-    const mail = user?.email || "";
-    const isAdmin = isAdminEmail(mail);
-    // admin melihat semua outlet, kasir melihat outlet aktif
     const base = collection(db, "sales");
-    const qSales = isAdmin
-      ? query(base, orderBy("createdAt", "desc"))
-      : query(base, where("outletId", "==", outletId), orderBy("createdAt", "desc"));
-    const unsub = onSnapshot(qSales, (snap) => {
-      const rows: SaleRow[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-      setSales(rows);
-    });
+    // Ambil semua sales by createdAt; outlet difilter saat render (hindari index gabungan)
+    const qSales = query(base, orderBy("createdAt", "desc"));
+
+    const unsub = onSnapshot(
+      qSales,
+      (snap) => {
+        const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as SaleRow[];
+        setSales(rows);
+      },
+      (err) => {
+        console.error("onSnapshot(sales) error:", err);
+        alert("Gagal memuat Riwayat: " + err.message + "\n(Cek Firestore index/rules)");
+      }
+    );
     return unsub;
   }
 
@@ -486,7 +478,6 @@ export default function App() {
         ingredientsMap: Object.fromEntries(ingredients.map((i) => [String(i.id), i])),
       });
 
-      // optional push to Google Sheets / webhook
       if (SHEETS_WEBHOOK) {
         try {
           fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "sale", outletId, ...rec }) });
@@ -523,26 +514,81 @@ export default function App() {
     alert("Shift dibuka ✅");
   }
 
+  // === GABUNGAN PERBAIKAN #1 + #2: getSalesRange & closeShift tanpa index gabungan ===
+  async function getSalesRange(startMs: number, endMs: number, outlet?: string) {
+    const base = collection(db, "sales");
+    // Query by tanggal saja (deviceDate) + orderBy → outlet difilter di memori
+    const qy = query(
+      base,
+      where("deviceDate", ">=", startMs),
+      where("deviceDate", "<", endMs),
+      orderBy("deviceDate", "desc")
+    );
+    const snap = await getDocs(qy);
+    const rows = snap.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
+    return outlet ? rows.filter(r => (r.outletId || "") === outlet) : rows;
+  }
+
   async function closeShift() {
-    if (!activeShift || activeShift.closedAt) return alert("Tidak ada shift aktif.");
-    const rows = await getSalesRange(activeShift.openedAt, Date.now(), outletId);
-    const totals: Record<string, number> = {};
-    let trx = 0;
-    for (const r of rows) {
-      totals[r.payMethod] = (totals[r.payMethod] || 0) + (r.total || 0);
-      trx++;
-    }
-    const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
-    const closed = { closedAt: Date.now(), closedBy: user?.email || "-", totals, trxCount: trx, cashClose };
-    await updateDoc(doc(db, "shifts", activeShift.id!), closed);
-    exportShiftCSV({ ...activeShift, ...closed });
-
-    if (SHEETS_WEBHOOK) {
-      try { fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "shift_close", outletId, ...activeShift, ...closed }) }); } catch {}
+    if (!activeShift || activeShift.closedAt) {
+      alert("Tidak ada shift aktif."); 
+      return;
     }
 
-    setActiveShift(null);
-    alert("Shift ditutup ✅ dan CSV diunduh.");
+    try {
+      // Rekap transaksi selama shift berjalan (tanpa index gabungan)
+      const rows = await getSalesRange(activeShift.openedAt, Date.now(), outletId);
+
+      const totals: Record<string, number> = {};
+      let trx = 0;
+      for (const r of rows) {
+        const m = String(r.payMethod || "Unknown");
+        totals[m] = (totals[m] || 0) + (Number(r.total) || 0);
+        trx++;
+      }
+
+      const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
+      const closedPayload = {
+        closedAt: Date.now(),
+        closedBy: user?.email || "-",
+        totals,
+        trxCount: trx,
+        cashClose
+      };
+
+      await updateDoc(doc(db, "shifts", activeShift.id!), closedPayload);
+      exportShiftCSV({ ...activeShift, ...closedPayload });
+
+      if (SHEETS_WEBHOOK) {
+        try {
+          fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "shift_close", outletId, ...activeShift, ...closedPayload }) });
+        } catch {}
+      }
+
+      setActiveShift(null);
+      alert("Shift ditutup ✅ dan CSV diunduh.");
+    } catch (err: any) {
+      console.error("closeShift error:", err);
+      // Fallback: tetap izinkan penutupan shift agar tidak nyangkut
+      if (confirm("Gagal merekap penjualan (mungkin butuh index Firestore). Tutup shift tanpa rekap?")) {
+        const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
+        const closedPayload = {
+          closedAt: Date.now(),
+          closedBy: user?.email || "-",
+          totals: {},
+          trxCount: 0,
+          cashClose
+        };
+        try {
+          await updateDoc(doc(db, "shifts", activeShift.id!), closedPayload);
+          setActiveShift(null);
+          alert("Shift ditutup (tanpa rekap).");
+        } catch (e2:any) {
+          console.error(e2);
+          alert("Gagal menutup shift. Cek Rules Firestore & izin write koleksi 'shifts'.");
+        }
+      }
+    }
   }
 
   function exportShiftCSV(sh: ShiftDoc) {
@@ -564,13 +610,9 @@ export default function App() {
     return new Date(y, (m - 1), d, 0, 0, 0, 0).getTime();
   }
 
-  async function getSalesRange(startMs: number, endMs: number, outlet?: string) {
-    const base = collection(db, "sales");
-    const qy = outlet
-      ? query(base, where("outletId", "==", outlet), where("deviceDate", ">=", startMs), where("deviceDate", "<", endMs), orderBy("deviceDate", "desc"))
-      : query(base, where("deviceDate", ">=", startMs), where("deviceDate", "<", endMs), orderBy("deviceDate", "desc"));
-    const snap = await getDocs(qy);
-    return snap.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
+  async function getSalesRangeDates(startMs: number, endMs: number, outlet?: string) {
+    // helper kalau butuh range di laporan
+    return getSalesRange(startMs, endMs, outlet);
   }
 
   function summarizeSales(rows: any[]) {
@@ -598,16 +640,17 @@ export default function App() {
     if (!from || !to) return alert("Pilih tanggal dari & sampai");
     const start = ymdToMs(from);
     const end = ymdToMs(to) + 24 * 60 * 60 * 1000;
-    const rows = await getSalesRange(start, end, outletId);
+    const rows = await getSalesRangeDates(start, end, outletId);
     setReport(summarizeSales(rows));
   }
 
   // ---------- Export ----------
   function exportSalesCSV() {
-    if (!sales.length) return alert("Tidak ada data.");
+    const rows = visibleSales;
+    if (!rows.length) return alert("Tidak ada data.");
     const hdr = ["time","outlet","payMethod","total","items"];
     const lines = [hdr.join(",")];
-    for (const s of sales) {
+    for (const s of rows) {
       const items = (s.items || []).map(it => `${it.name} x${it.qty}`).join("; ");
       lines.push([s.time, s.outletId || "", s.payMethod, s.total, `"${String(items).replace(/"/g, '""')}"`].join(","));
     }
@@ -643,7 +686,7 @@ export default function App() {
   }
   async function logout() { await signOut(getAuth()); }
 
-  // ---------- Loyalty QR (optional, pakai layanan QR publik) ----------
+  // ---------- Loyalty QR (optional) ----------
   const loyaltyUrl = customerPhone ? `https://loyalty.chafumatcha.app/p/${encodeURIComponent(customerPhone)}` : "";
   const loyaltyQR = customerPhone
     ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(loyaltyUrl)}`
@@ -849,7 +892,7 @@ export default function App() {
             <h2>Riwayat Transaksi</h2>
             <button onClick={exportSalesCSV}>Export CSV</button>
           </div>
-          {sales.length === 0 ? (
+          {visibleSales.length === 0 ? (
             <p>Belum ada transaksi.</p>
           ) : (
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -863,7 +906,7 @@ export default function App() {
                 </tr>
               </thead>
               <tbody>
-                {sales.map((s) => (
+                {visibleSales.map((s) => (
                   <tr key={s.id}>
                     <td>{s.time}</td>
                     <td>{s.outletId || "-"}</td>
@@ -882,7 +925,7 @@ export default function App() {
       {tab === "laporan" && isAdmin && (
         <main style={{ marginTop: 12 }}>
           <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-            <h2>Laporan ({outletId})</h2>
+            <h2>Lap. Ringkas ({outletId})</h2>
             <div style={{display:"flex", gap:8}}>
               <button onClick={exportReportCSV}>Export CSV</button>
             </div>
@@ -930,7 +973,7 @@ export default function App() {
         </main>
       )}
 
-      {/* Owner Dashboard (tren + stok kritis) */}
+      {/* Owner Dashboard */}
       {tab === "dashboard" && isAdmin && (
         <DashboardView outletId={outletId} report={report} from={from} to={to} onRefresh={loadReport} ingredients={ingredients} />
       )}
