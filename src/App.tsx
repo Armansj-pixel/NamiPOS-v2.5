@@ -1,21 +1,27 @@
-// src/App.tsx — CHAFU MATCHA POS (FINAL 80mm, lengkap)
-// ------------------------------------------------------------------------------------------------
-// Fitur:
-// - Login Firebase (Email/Password) — admin tab by email
-// - POS: Tunai + E-Wallet (QR otomatis), cetak struk auto (thermal 80mm)
-// - Inventory (bahan), Resep (auto deduct stok saat transaksi)
-// - Riwayat transaksi (live Firestore, admin only)
-// - Dashboard Laporan (omzet, trx, AOV, top produk, stok rendah, rentang tanggal)
-// - Loyalty: Earn & Redeem poin by No HP (aturan via settings/global)
-// - Shift Kasir: Buka/Tutup shift, rekap per metode bayar, export CSV
-// - Export CSV (Riwayat/Laporan), Export PDF ringkas (Laporan), Reorder CSV (stok kritis)
-// ------------------------------------------------------------------------------------------------
-// Syarat:
-// - /public/qr-qris.png untuk QR e-wallet
-// - ENV Firebase (VITE_FIREBASE_*) sudah terpasang
-// - file ./lib/firebase.ts versi terbaru (sudah kamu pakai)
+// src/App.tsx — CHAFU MATCHA POS ✨ SUPER FINAL (one-file)
+// ===================================================================================
+// Fitur besar (tanpa lib tambahan):
+// - POS: Tunai + E-Wallet (QR otomatis) + print struk 80mm
+// - Inventory + Resep (auto deduct saat transaksi)
+// - Loyalty (earn/redeem), katalog pelanggan, QR loyalty optional
+// - Riwayat realtime, Export CSV
+// - Owner Dashboard (mobile-friendly): KPI, tren harian, top produk, stok kritis
+// - Offline-first: queue transaksi saat offline, auto-sync saat online
+// - Integrasi Google Sheets (opsional via VITE_SHEETS_WEBHOOK)
+// - Multi-outlet: selector outlet, filter dashboard per outlet
+//
+// Kebutuhan file:
+// - public/qr-qris.png   → QR E-Wallet
+// - src/lib/firebase.ts  → sudah versi yang kita pakai sebelumnya (Firestore ready)
+//
+// ENV (Vercel):
+// - VITE_FIREBASE_* (semua yang sudah kamu pakai)
+// - (opsional) VITE_SHEETS_WEBHOOK → URL Apps Script/Webhook untuk log transaksi & stok
+//
+// Catatan: Demi ringkas & stabil di mobile, chart menggunakan <canvas> sederhana.
+// ===================================================================================
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   db,
   fetchProducts, upsertProduct, removeProduct,
@@ -35,7 +41,7 @@ import {
   signInWithEmailAndPassword, signOut, User
 } from "firebase/auth";
 
-// ---------------- Utils ----------------
+// ----------------------- Utils -----------------------
 const IDR = (n: number) =>
   new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
 
@@ -55,8 +61,61 @@ const walletQR: Record<string, string> = {
   Transfer: "/qr-qris.png",
 };
 
-// ---------------- Types ----------------
-type Product = { id: number; name: string; price: number; active?: boolean };
+const SHEETS_WEBHOOK = (import.meta as any).env?.VITE_SHEETS_WEBHOOK || "";
+
+// Draw simple line chart to canvas (no external lib)
+function drawLineChart(canvas: HTMLCanvasElement, labels: string[], data: number[]) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const w = (canvas.width = canvas.clientWidth * (devicePixelRatio || 1));
+  const h = (canvas.height = canvas.clientHeight * (devicePixelRatio || 1));
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.scale(devicePixelRatio || 1, devicePixelRatio || 1);
+
+  const pad = 20;
+  const innerW = canvas.clientWidth - pad * 2;
+  const innerH = canvas.clientHeight - pad * 2;
+
+  const max = Math.max(1, Math.max(...data, 0));
+  const stepX = data.length > 1 ? innerW / (data.length - 1) : 0;
+
+  // grid
+  ctx.strokeStyle = "#eee";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = pad + (innerH / 4) * i;
+    ctx.beginPath();
+    ctx.moveTo(pad, y);
+    ctx.lineTo(pad + innerW, y);
+    ctx.stroke();
+  }
+
+  // line
+  ctx.strokeStyle = "#2e7d32";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.forEach((v, idx) => {
+    const x = pad + stepX * idx;
+    const y = pad + innerH - (v / max) * innerH;
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // dots
+  ctx.fillStyle = "#2e7d32";
+  data.forEach((v, idx) => {
+    const x = pad + stepX * idx;
+    const y = pad + innerH - (v / max) * innerH;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+// -------------- Types --------------
+type Product = { id: number; name: string; price: number; active?: boolean; category?: string };
 type CartItem = { id: string; productId: number; name: string; price: number; qty: number };
 
 type SaleRow = {
@@ -64,6 +123,7 @@ type SaleRow = {
   time: string;
   timeMs: number;
   cashier: string;
+  outletId?: string;
   items: { name: string; qty: number; price: number }[];
   subtotal: number;
   discount: number;
@@ -87,6 +147,7 @@ type ShiftDoc = {
   id?: string;
   openedAt: number;
   openedBy: string;
+  outletId?: string;
   closedAt?: number | null;
   closedBy?: string | null;
   cashOpen?: number;
@@ -96,23 +157,23 @@ type ShiftDoc = {
 };
 
 type SettingsDoc = {
-  pointEarnPerRp: number;     // 1 poin / X rupiah
-  pointValueRp: number;       // 1 poin = Y rupiah
-  maxRedeemPoints?: number;   // batas poin per trx (0 = no limit)
-  pointExpiryDays?: number;   // 0 = no expiry (tidak dipakai di UI)
-  lowStockThreshold?: number; // ambang stok rendah
+  pointEarnPerRp: number;
+  pointValueRp: number;
+  maxRedeemPoints?: number;
+  pointExpiryDays?: number;
+  lowStockThreshold?: number;
 };
 
-// ---------------- Defaults ----------------
+// -------------- Defaults --------------
 const DEFAULT_PRODUCTS: Product[] = [
-  { id: 1, name: "Matcha OG", price: 15000, active: true },
-  { id: 2, name: "Matcha Cloud", price: 18000, active: true },
-  { id: 3, name: "Strawberry Cream Matcha", price: 17000, active: true },
-  { id: 4, name: "Choco Matcha", price: 17000, active: true },
-  { id: 5, name: "Matcha Cookies", price: 17000, active: true },
-  { id: 6, name: "Honey Matcha", price: 18000, active: true },
-  { id: 7, name: "Coconut Matcha", price: 18000, active: true },
-  { id: 8, name: "Orange Matcha", price: 17000, active: true },
+  { id: 1, name: "Matcha OG", price: 15000, active: true, category: "Signature" },
+  { id: 2, name: "Matcha Cloud", price: 18000, active: true, category: "Signature" },
+  { id: 3, name: "Strawberry Cream Matcha", price: 17000, active: true, category: "Signature" },
+  { id: 4, name: "Choco Matcha", price: 17000, active: true, category: "Signature" },
+  { id: 5, name: "Matcha Cookies", price: 17000, active: true, category: "Signature" },
+  { id: 6, name: "Honey Matcha", price: 18000, active: true, category: "Signature" },
+  { id: 7, name: "Coconut Matcha", price: 18000, active: true, category: "Signature" },
+  { id: 8, name: "Orange Matcha", price: 17000, active: true, category: "Signature" },
 ];
 
 const DEFAULT_SETTINGS: SettingsDoc = {
@@ -123,7 +184,13 @@ const DEFAULT_SETTINGS: SettingsDoc = {
   lowStockThreshold: 10,
 };
 
-// ---------------- App ----------------
+// -------------- Offline Queue Keys --------------
+const K_PENDING_SALES = "pos.pendingSales.v1"; // antrian transaksi offline
+const K_OUTLET = "pos.outlet.v1";
+
+// ===================================================================================
+// MAIN APP
+// ===================================================================================
 export default function App() {
   const auth = getAuth();
 
@@ -133,7 +200,11 @@ export default function App() {
   const [pass, setPass] = useState("");
 
   // Tabs
-  const [tab, setTab] = useState<"pos" | "produk" | "inventori" | "resep" | "riwayat" | "laporan">("pos");
+  const [tab, setTab] = useState<"pos" | "produk" | "inventori" | "resep" | "riwayat" | "laporan" | "dashboard" | "loyalty">("pos");
+
+  // Outlet
+  const [outletId, setOutletId] = useState<string>(() => localStorage.getItem(K_OUTLET) || "OUTLET-01");
+  useEffect(() => localStorage.setItem(K_OUTLET, outletId), [outletId]);
 
   // Master data
   const [products, setProducts] = useState<Product[]>([]);
@@ -165,9 +236,19 @@ export default function App() {
   // Laporan
   const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
-  const [report, setReport] = useState<{ omzet: number; trx: number; aov: number; top: { name: string; qty: number }[] }>({
-    omzet: 0, trx: 0, aov: 0, top: []
+  const [report, setReport] = useState<{ omzet: number; trx: number; aov: number; top: { name: string; qty: number }[], trend: { d: string; amt: number }[] }>({
+    omzet: 0, trx: 0, aov: 0, top: [], trend: []
   });
+
+  // Online state
+  const [online, setOnline] = useState<boolean>(navigator.onLine);
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
 
   // ---------- Auth lifecycle ----------
   useEffect(() => {
@@ -176,35 +257,29 @@ export default function App() {
       if (u) {
         await ensureUserProfile(u);
         await loadSettings();
+        await loadData();
+        subscribeSales(); // realtime riwayat
+        hydratePendingQueue(); // coba sync jika ada antrian
       }
     });
     return () => unsub();
   }, []);
 
-  // ---------- Load master + subscribe riwayat + shift ----------
-  useEffect(() => {
-    if (!user) return;
-    loadData();
-
-    if (isAdminEmail(user.email || "")) {
-      const qSales = query(collection(db, "sales"), orderBy("createdAt", "desc"));
-      const unsub = onSnapshot(qSales, (snap) => {
-        const rows: SaleRow[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-        setSales(rows);
-      });
-      // fetch active shift
-      (async () => {
-        const qy = query(collection(db, "shifts"), where("closedAt", "==", null), orderBy("openedAt", "desc"));
-        const ss = await getDocs(qy);
-        if (!ss.empty) {
-          const d = ss.docs[0];
-          setActiveShift({ id: d.id, ...(d.data() as any) });
-        } else setActiveShift(null);
-      })();
-
-      return () => unsub();
-    }
-  }, [user]);
+  // ---------- Subscribe Riwayat ----------
+  function subscribeSales() {
+    const mail = user?.email || "";
+    const isAdmin = isAdminEmail(mail);
+    // admin melihat semua outlet, kasir melihat outlet aktif
+    const base = collection(db, "sales");
+    const qSales = isAdmin
+      ? query(base, orderBy("createdAt", "desc"))
+      : query(base, where("outletId", "==", outletId), orderBy("createdAt", "desc"));
+    const unsub = onSnapshot(qSales, (snap) => {
+      const rows: SaleRow[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+      setSales(rows);
+    });
+    return unsub;
+  }
 
   // ---------- Derived ----------
   function isAdminEmail(e: string) {
@@ -258,7 +333,7 @@ export default function App() {
     if (!snap.exists()) {
       const mail = (u.email || "").toLowerCase();
       const role = isAdminEmail(mail) ? "owner" : "cashier";
-      await setDoc(ref, { email: mail, role, createdAt: Date.now() });
+      await setDoc(ref, { email: mail, role, createdAt: Date.now(), outletId });
     }
   }
 
@@ -279,12 +354,13 @@ export default function App() {
     const base = snap.exists() ? (snap.data() as any) : { points: 0, visits: 0 };
     await setDoc(ref, {
       ...base,
+      name: customerName || base.name || "",
       points: (base.points || 0) + earned,
       visits: (base.visits || 0) + 1,
       lastVisit: Date.now()
     }, { merge: true });
     await addDoc(collection(db, "loyalty_logs"), {
-      phone, pointsChange: earned, type: "earn", saleId, at: Date.now()
+      phone, pointsChange: earned, type: "earn", saleId, at: Date.now(), outletId
     });
   }
 
@@ -294,9 +370,9 @@ export default function App() {
     const snap = await getDoc(ref);
     const current = snap.exists() ? ((snap.data() as any).points || 0) : 0;
     const newPts = Math.max(0, current - usePts);
-    await updateDoc(ref, { points: newPts });
+    await setDoc(ref, { points: newPts }, { merge: true });
     await addDoc(collection(db, "loyalty_logs"), {
-      phone, pointsChange: -usePts, type: "redeem", saleId, at: Date.now()
+      phone, pointsChange: -usePts, type: "redeem", saleId, at: Date.now(), outletId
     });
   }
 
@@ -336,6 +412,27 @@ export default function App() {
     setCustomerName("");
   }
 
+  // ---------- Offline queue ----------
+  function pushPending(rec: any) {
+    const arr = JSON.parse(localStorage.getItem(K_PENDING_SALES) || "[]");
+    arr.unshift(rec);
+    localStorage.setItem(K_PENDING_SALES, JSON.stringify(arr));
+  }
+  async function hydratePendingQueue() {
+    if (!navigator.onLine) return;
+    const arr: any[] = JSON.parse(localStorage.getItem(K_PENDING_SALES) || "[]");
+    if (!arr.length) return;
+    for (const rec of [...arr].reverse()) {
+      try {
+        await addDoc(collection(db, "sales"), rec);
+        arr.shift();
+      } catch {}
+    }
+    localStorage.setItem(K_PENDING_SALES, JSON.stringify([]));
+  }
+  useEffect(() => { if (online) hydratePendingQueue(); }, [online]);
+
+  // ---------- Finalize ----------
   async function finalizeSale() {
     if (!cart.length) return alert("Keranjang kosong!");
     if (usePoints > redeemCap) return alert("Poin yang digunakan melebihi batas.");
@@ -344,7 +441,6 @@ export default function App() {
     const saleId = Date.now().toString();
     const earned = calcEarnedPoints(finalTotal);
 
-    // simpan/merge nama customer (opsional)
     if (customerPhone && customerName.trim()) {
       await setDoc(doc(db, "customers", customerPhone), { name: customerName.trim() }, { merge: true });
     }
@@ -353,13 +449,11 @@ export default function App() {
       time: new Date().toLocaleString("id-ID", { hour12: false }),
       timeMs: Date.now(),
       cashier: user?.email || "-",
+      outletId,
       items: cart.map((i) => ({ name: i.name, qty: i.qty, price: i.price })),
       subtotal,
       discount: redeemValueRp,
-      taxRate: 0,
-      serviceRate: 0,
-      taxValue: 0,
-      serviceValue: 0,
+      taxRate: 0, serviceRate: 0, taxValue: 0, serviceValue: 0,
       total: finalTotal,
       payMethod,
       cash: payMethod === "Tunai" ? cash : 0,
@@ -372,50 +466,66 @@ export default function App() {
       deviceDate: Date.now(),
     };
 
-    await addDoc(collection(db, "sales"), rec);
+    try {
+      if (navigator.onLine) {
+        await addDoc(collection(db, "sales"), rec);
+      } else {
+        pushPending(rec);
+      }
 
-    if (customerPhone) {
-      if (usePoints > 0) await redeemLoyaltyPoints(customerPhone, usePoints, saleId);
-      if (earned > 0) await addLoyaltyPoints(customerPhone, earned, saleId);
-      await fetchCustomerPointsByPhone(customerPhone);
+      if (customerPhone) {
+        if (usePoints > 0) await redeemLoyaltyPoints(customerPhone, usePoints, saleId);
+        if (earned > 0) await addLoyaltyPoints(customerPhone, earned, saleId);
+        await fetchCustomerPointsByPhone(customerPhone);
+      }
+
+      await deductStockForSale({
+        saleId,
+        items: cart.map((c) => ({ productId: c.productId, name: c.name, qty: c.qty })),
+        recipes,
+        ingredientsMap: Object.fromEntries(ingredients.map((i) => [String(i.id), i])),
+      });
+
+      // optional push to Google Sheets / webhook
+      if (SHEETS_WEBHOOK) {
+        try {
+          fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "sale", outletId, ...rec }) });
+        } catch {}
+      }
+
+      printReceipt80mm({
+        ...rec,
+        subtotal,
+        total: finalTotal,
+        cash: rec.cash,
+        change: rec.change,
+      });
+
+      clearCart();
+      alert("Transaksi selesai ✅");
+    } catch (e: any) {
+      alert("Gagal menyimpan transaksi, disimpan ke antrian offline.");
+      pushPending(rec);
     }
-
-    await deductStockForSale({
-      saleId,
-      items: cart.map((c) => ({ productId: c.productId, name: c.name, qty: c.qty })),
-      recipes,
-      ingredientsMap: Object.fromEntries(ingredients.map((i) => [String(i.id), i])),
-    });
-
-    printReceipt80mm({
-      ...rec,
-      subtotal,
-      total: finalTotal,
-      cash: rec.cash,
-      change: rec.change,
-    });
-
-    clearCart();
-    alert("Transaksi selesai ✅");
   }
 
   // ---------- Shift ----------
   async function openShift() {
     if (activeShift && !activeShift.closedAt) return alert("Shift masih aktif.");
     const cashOpen = Number(prompt("Cash Drawer Awal (opsional)?") || 0);
-    const sh: ShiftDoc = {
-      openedAt: Date.now(),
-      openedBy: user?.email || "-",
-      cashOpen
-    };
+    const sh: ShiftDoc = { openedAt: Date.now(), openedBy: user?.email || "-", cashOpen, outletId };
     const ref = await addDoc(collection(db, "shifts"), { ...sh, closedAt: null });
     setActiveShift({ ...sh, id: ref.id, closedAt: null });
+
+    if (SHEETS_WEBHOOK) {
+      try { fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "shift_open", ...sh }) }); } catch {}
+    }
     alert("Shift dibuka ✅");
   }
 
   async function closeShift() {
     if (!activeShift || activeShift.closedAt) return alert("Tidak ada shift aktif.");
-    const rows = await getSalesRange(activeShift.openedAt, Date.now());
+    const rows = await getSalesRange(activeShift.openedAt, Date.now(), outletId);
     const totals: Record<string, number> = {};
     let trx = 0;
     for (const r of rows) {
@@ -423,44 +533,42 @@ export default function App() {
       trx++;
     }
     const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
-    await updateDoc(doc(db, "shifts", activeShift.id!), {
-      closedAt: Date.now(),
-      closedBy: user?.email || "-",
-      totals,
-      trxCount: trx,
-      cashClose
-    });
-    exportShiftCSV({ ...activeShift, totals, trxCount: trx, cashClose, closedAt: Date.now(), closedBy: user?.email || "-" });
+    const closed = { closedAt: Date.now(), closedBy: user?.email || "-", totals, trxCount: trx, cashClose };
+    await updateDoc(doc(db, "shifts", activeShift.id!), closed);
+    exportShiftCSV({ ...activeShift, ...closed });
+
+    if (SHEETS_WEBHOOK) {
+      try { fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "shift_close", outletId, ...activeShift, ...closed }) }); } catch {}
+    }
+
     setActiveShift(null);
     alert("Shift ditutup ✅ dan CSV diunduh.");
   }
 
   function exportShiftCSV(sh: ShiftDoc) {
-    const hdr = ["openedAt", "openedBy", "closedAt", "closedBy", "trxCount", "cashOpen", "cashClose", "method", "amount"];
+    const hdr = ["outlet", "openedAt", "openedBy", "closedAt", "closedBy", "trxCount", "cashOpen", "cashClose", "method", "amount"];
     const lines = [hdr.join(",")];
     const rows = Object.entries(sh.totals || { Unknown: 0 }).map(([m, a]) => [
-      sh.openedAt, sh.openedBy, sh.closedAt, sh.closedBy, sh.trxCount ?? 0, sh.cashOpen ?? 0, sh.cashClose ?? 0, m, a
+      outletId, sh.openedAt, sh.openedBy, sh.closedAt, sh.closedBy, sh.trxCount ?? 0, sh.cashOpen ?? 0, sh.cashClose ?? 0, m, a
     ]);
     for (const r of rows) lines.push(r.join(","));
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `shift_${sh.openedAt}_${sh.closedAt}.csv`; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `shift_${outletId}_${sh.openedAt}_${sh.closedAt}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
-  // ---------- Laporan ----------
+  // ---------- Laporan & Dashboard ----------
   function ymdToMs(ymd: string) {
     const [y, m, d] = ymd.split("-").map(Number);
     return new Date(y, (m - 1), d, 0, 0, 0, 0).getTime();
   }
 
-  async function getSalesRange(startMs: number, endMs: number) {
-    const qy = query(
-      collection(db, "sales"),
-      where("deviceDate", ">=", startMs),
-      where("deviceDate", "<", endMs),
-      orderBy("deviceDate", "desc")
-    );
+  async function getSalesRange(startMs: number, endMs: number, outlet?: string) {
+    const base = collection(db, "sales");
+    const qy = outlet
+      ? query(base, where("outletId", "==", outlet), where("deviceDate", ">=", startMs), where("deviceDate", "<", endMs), orderBy("deviceDate", "desc"))
+      : query(base, where("deviceDate", ">=", startMs), where("deviceDate", "<", endMs), orderBy("deviceDate", "desc"));
     const snap = await getDocs(qy);
     return snap.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
   }
@@ -471,7 +579,10 @@ export default function App() {
     const aov = trx ? Math.round(omzet / trx) : 0;
 
     const productCount: Record<string, number> = {};
+    const dayMap: Record<string, number> = {};
     for (const r of rows) {
+      const date = new Date(r.deviceDate || r.timeMs).toISOString().slice(0, 10);
+      dayMap[date] = (dayMap[date] || 0) + (r.total || 0);
       for (const it of (r.items || [])) {
         productCount[it.name] = (productCount[it.name] || 0) + (it.qty || 0);
       }
@@ -479,30 +590,30 @@ export default function App() {
     const top = Object.entries(productCount)
       .sort((a, b) => b[1] - a[1]).slice(0, 5)
       .map(([name, qty]) => ({ name, qty }));
-
-    return { omzet, trx, aov, top };
+    const trend = Object.entries(dayMap).sort((a, b) => a[0].localeCompare(b[0])).map(([d, amt]) => ({ d, amt }));
+    return { omzet, trx, aov, top, trend };
   }
 
   async function loadReport() {
     if (!from || !to) return alert("Pilih tanggal dari & sampai");
     const start = ymdToMs(from);
     const end = ymdToMs(to) + 24 * 60 * 60 * 1000;
-    const rows = await getSalesRange(start, end);
+    const rows = await getSalesRange(start, end, outletId);
     setReport(summarizeSales(rows));
   }
 
   // ---------- Export ----------
   function exportSalesCSV() {
     if (!sales.length) return alert("Tidak ada data.");
-    const hdr = ["time", "payMethod", "total", "items"];
+    const hdr = ["time","outlet","payMethod","total","items"];
     const lines = [hdr.join(",")];
     for (const s of sales) {
       const items = (s.items || []).map(it => `${it.name} x${it.qty}`).join("; ");
-      lines.push([s.time, s.payMethod, s.total, `"${String(items).replace(/"/g, '""')}"`].join(","));
+      lines.push([s.time, s.outletId || "", s.payMethod, s.total, `"${String(items).replace(/"/g, '""')}"`].join(","));
     }
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `sales_${Date.now()}.csv`; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `sales_${outletId}_${Date.now()}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
@@ -518,36 +629,7 @@ export default function App() {
     for (const t of report.top) { lines.push([t.name, t.qty].join(",")); }
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `report_${from}_${to}.csv`; a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function exportReportPDF() {
-    const w = window.open("", "_blank", "width=800,height=900");
-    if (!w) return;
-    w.document.write(`
-      <html><head><title>Laporan</title></head><body>
-      <h2>Laporan ${from} s/d ${to}</h2>
-      <p>Omzet: ${IDR(report.omzet)}<br/>Transaksi: ${report.trx}<br/>AOV: ${IDR(report.aov)}</p>
-      <h3>Top Produk</h3>
-      <ul>${report.top.map(t => `<li>${t.name} — ${t.qty} cup</li>`).join("")}</ul>
-      </body></html>
-    `);
-    w.document.close(); w.print();
-  }
-
-  function exportReorderCSV() {
-    const low = ingredients.filter(i => i.stock <= (settingsDoc.lowStockThreshold || 10));
-    if (!low.length) return alert("Tidak ada bahan di bawah ambang.");
-    const hdr = ["name", "stock", "unit", "suggested_order"];
-    const lines = [hdr.join(",")];
-    for (const i of low) {
-      const suggested = Math.max((settingsDoc.lowStockThreshold || 10) * 2 - (i.stock || 0), 0);
-      lines.push([i.name, String(i.stock || 0), i.unit || "", String(suggested)].join(","));
-    }
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `reorder_${Date.now()}.csv`; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `report_${outletId}_${from}_${to}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
@@ -561,51 +643,78 @@ export default function App() {
   }
   async function logout() { await signOut(getAuth()); }
 
+  // ---------- Loyalty QR (optional, pakai layanan QR publik) ----------
+  const loyaltyUrl = customerPhone ? `https://loyalty.chafumatcha.app/p/${encodeURIComponent(customerPhone)}` : "";
+  const loyaltyQR = customerPhone
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(loyaltyUrl)}`
+    : "";
+
+  // ---------- UI: Login ----------
   if (!user)
     return (
-      <div style={{ padding: 40, textAlign: "center" }}>
-        <h2>CHAFU MATCHA POS Login</h2>
-        <div style={{ display: "inline-flex", flexDirection: "column", gap: 8 }}>
-          <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} style={{ padding: 10, borderRadius: 8 }} />
-          <input type="password" placeholder="Password" value={pass} onChange={(e) => setPass(e.target.value)} style={{ padding: 10, borderRadius: 8 }} />
-          <button onClick={login} className="btn" style={{ background: "#2e7d32", color: "#fff" }}>Login</button>
+      <div style={{ padding: 20, maxWidth: 420, margin: "0 auto" }}>
+        <h2>CHAFU MATCHA POS — Login</h2>
+        <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+          <label>Outlet</label>
+          <select value={outletId} onChange={(e)=>setOutletId(e.target.value)}>
+            <option value="OUTLET-01">OUTLET-01</option>
+            <option value="OUTLET-02">OUTLET-02</option>
+            <option value="OUTLET-03">OUTLET-03</option>
+          </select>
+          <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input type="password" placeholder="Password" value={pass} onChange={(e) => setPass(e.target.value)} />
+          <button onClick={login} style={{ background: "#2e7d32", color: "#fff", padding: 10, borderRadius: 8 }}>Login</button>
         </div>
+        <p style={{ fontSize: 12, opacity: .7, marginTop: 6 }}>Status: {online ? "Online" : "Offline (akan sync otomatis)"}</p>
       </div>
     );
 
-  // ---------- Main UI ----------
+  // ---------- UI: Main ----------
   return (
-    <div className="app" style={{ padding: 12 }}>
-      <header className="header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <h1>CHAFU MATCHA POS</h1>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => setTab("pos")} className="btn">POS</button>
+    <div style={{ padding: 10, maxWidth: 1100, margin: "0 auto" }}>
+      <header style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div>
+          <h1 style={{ margin: 0 }}>CHAFU MATCHA POS</h1>
+          <small>Outlet: </small>
+          <select value={outletId} onChange={(e)=>setOutletId(e.target.value)}>
+            <option value="OUTLET-01">OUTLET-01</option>
+            <option value="OUTLET-02">OUTLET-02</option>
+            <option value="OUTLET-03">OUTLET-03</option>
+          </select>
+          <small style={{ marginLeft: 8, color: online ? "#2e7d32" : "#c62828" }}>
+            {online ? "Online" : "Offline — transaksi akan diantrikan"}
+          </small>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => setTab("pos")}>POS</button>
           {isAdmin && (
             <>
-              <button onClick={() => setTab("produk")} className="btn">Produk</button>
-              <button onClick={() => setTab("inventori")} className="btn">Inventory</button>
-              <button onClick={() => setTab("resep")} className="btn">Resep</button>
-              <button onClick={() => setTab("riwayat")} className="btn">Riwayat</button>
-              <button onClick={() => setTab("laporan")} className="btn">Laporan</button>
-              <button onClick={openShift} className="btn">Buka Shift</button>
-              <button onClick={closeShift} className="btn" style={{ background: "#263238", color: "#fff" }}>
+              <button onClick={() => setTab("produk")}>Produk</button>
+              <button onClick={() => setTab("inventori")}>Inventory</button>
+              <button onClick={() => setTab("resep")}>Resep</button>
+              <button onClick={() => setTab("riwayat")}>Riwayat</button>
+              <button onClick={() => setTab("laporan")}>Laporan</button>
+              <button onClick={() => setTab("dashboard")}>Dashboard</button>
+              <button onClick={() => setTab("loyalty")}>Loyalty</button>
+              <button onClick={openShift}>Buka Shift</button>
+              <button onClick={closeShift} style={{ background: "#263238", color: "#fff" }}>
                 Tutup Shift {activeShift ? "(aktif)" : ""}
               </button>
             </>
           )}
-          <button onClick={logout} className="btn" style={{ background: "#e53935", color: "#fff" }}>Logout</button>
+          <button onClick={logout} style={{ background: "#e53935", color: "#fff" }}>Logout</button>
         </div>
       </header>
 
       {/* POS */}
       {tab === "pos" && (
-        <main className="pos-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <main style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           {/* Menu */}
-          <section className="section" style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
+          <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
             <h2>Menu</h2>
-            <div className="product-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
               {products.filter(p => p.active !== false).map((p) => (
-                <button key={p.id} onClick={() => addToCart(p)} className="btn" style={{ textAlign: "left", border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
+                <button key={p.id} onClick={() => addToCart(p)} style={{ textAlign: "left", border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
                   <div>{p.name}</div>
                   <small>{IDR(p.price)}</small>
                 </button>
@@ -614,7 +723,7 @@ export default function App() {
           </section>
 
           {/* Keranjang */}
-          <section className="section" style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
+          <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
             <h2>Keranjang</h2>
 
             {/* Loyalty + katalog */}
@@ -662,10 +771,10 @@ export default function App() {
                 <div>{c.name} <small>x{c.qty}</small></div>
                 <div>{IDR(c.price * c.qty)}</div>
                 <div>
-                  <button className="btn" onClick={() => dec(c)}>-</button>
-                  <button className="btn" onClick={() => inc(c)}>+</button>
+                  <button onClick={() => dec(c)}>-</button>
+                  <button onClick={() => inc(c)}>+</button>
                 </div>
-                <button className="btn" onClick={() => rm(c)}>Hapus</button>
+                <button onClick={() => rm(c)}>Hapus</button>
               </div>
             ))}
             <hr />
@@ -688,14 +797,14 @@ export default function App() {
                 </>
               ) : (
                 <div style={{ textAlign: "center" }}>
-                  <img className="qr-img" src={walletQR[payMethod]} alt="QR" style={{ maxWidth: 240 }} />
+                  <img src={walletQR[payMethod]} alt="QR" style={{ maxWidth: 240 }} />
                   <p>Scan untuk bayar ({payMethod})</p>
                 </div>
               )}
 
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn" onClick={clearCart}>Bersihkan</button>
-                <button className="btn" style={{ background: "#2e7d32", color: "#fff", flex: 1 }} onClick={finalizeSale}>
+                <button onClick={clearCart}>Bersihkan</button>
+                <button style={{ background: "#2e7d32", color: "#fff", flex: 1 }} onClick={finalizeSale}>
                   Selesaikan & Cetak
                 </button>
               </div>
@@ -706,7 +815,7 @@ export default function App() {
 
       {/* Produk */}
       {tab === "produk" && isAdmin && (
-        <main className="section" style={{ marginTop: 12 }}>
+        <main style={{ marginTop: 12 }}>
           <h2>Manajemen Produk</h2>
           <ProductManager products={products} onChange={setProducts} />
         </main>
@@ -714,15 +823,15 @@ export default function App() {
 
       {/* Inventory */}
       {tab === "inventori" && isAdmin && (
-        <main className="section" style={{ marginTop: 12 }}>
+        <main style={{ marginTop: 12 }}>
           <h2>Inventory Bahan</h2>
-          <InventoryManager ingredients={ingredients} onChange={setIngredients} />
+          <InventoryManager ingredients={ingredients} onChange={setIngredients} outletId={outletId} />
         </main>
       )}
 
       {/* Resep */}
       {tab === "resep" && isAdmin && (
-        <main className="section" style={{ marginTop: 12 }}>
+        <main style={{ marginTop: 12 }}>
           <h2>Resep Produk</h2>
           <RecipeManager
             products={products}
@@ -735,10 +844,10 @@ export default function App() {
 
       {/* Riwayat */}
       {tab === "riwayat" && isAdmin && (
-        <main className="section table-scroll" style={{ marginTop: 12 }}>
+        <main style={{ marginTop: 12 }}>
           <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
             <h2>Riwayat Transaksi</h2>
-            <button className="btn" onClick={exportSalesCSV}>Export CSV</button>
+            <button onClick={exportSalesCSV}>Export CSV</button>
           </div>
           {sales.length === 0 ? (
             <p>Belum ada transaksi.</p>
@@ -747,6 +856,7 @@ export default function App() {
               <thead>
                 <tr>
                   <th style={{ textAlign: "left" }}>Waktu</th>
+                  <th style={{ textAlign: "left" }}>Outlet</th>
                   <th style={{ textAlign: "left" }}>Item</th>
                   <th style={{ textAlign: "right" }}>Total</th>
                   <th style={{ textAlign: "center" }}>Metode</th>
@@ -756,6 +866,7 @@ export default function App() {
                 {sales.map((s) => (
                   <tr key={s.id}>
                     <td>{s.time}</td>
+                    <td>{s.outletId || "-"}</td>
                     <td>{(s.items || []).map((it: any) => `${it.name} x${it.qty}`).join(", ")}</td>
                     <td style={{ textAlign: "right" }}>{IDR(s.total)}</td>
                     <td style={{ textAlign: "center" }}>{s.payMethod}</td>
@@ -767,15 +878,13 @@ export default function App() {
         </main>
       )}
 
-      {/* Laporan */}
+      {/* Laporan (range & summary) */}
       {tab === "laporan" && isAdmin && (
-        <main className="section" style={{ marginTop: 12 }}>
+        <main style={{ marginTop: 12 }}>
           <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-            <h2>Dashboard Laporan</h2>
+            <h2>Laporan ({outletId})</h2>
             <div style={{display:"flex", gap:8}}>
-              <button className="btn" onClick={exportReportCSV}>Export CSV</button>
-              <button className="btn" onClick={exportReportPDF}>Export PDF</button>
-              <button className="btn" onClick={exportReorderCSV}>Reorder CSV</button>
+              <button onClick={exportReportCSV}>Export CSV</button>
             </div>
           </div>
 
@@ -784,21 +893,21 @@ export default function App() {
             <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
             <label>Sampai:</label>
             <input type="date" value={to} onChange={e => setTo(e.target.value)} />
-            <button className="btn" onClick={loadReport}>Terapkan</button>
-            <button className="btn" onClick={() => {
+            <button onClick={loadReport}>Terapkan</button>
+            <button onClick={() => {
               const t = new Date();
               const yyyy = t.getFullYear();
               const mm = String(t.getMonth() + 1).padStart(2, "0");
               const dd = String(t.getDate()).padStart(2, "0");
               setFrom(`${yyyy}-${mm}-${dd}`); setTo(`${yyyy}-${mm}-${dd}`);
             }}>Hari ini</button>
-            <button className="btn" onClick={() => {
+            <button onClick={() => {
               const end = new Date();
               const start = new Date(end); start.setDate(end.getDate() - 6);
               const f = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
               setFrom(f(start)); setTo(f(end));
             }}>7 hari</button>
-            <button className="btn" onClick={() => {
+            <button onClick={() => {
               const t = new Date();
               const f = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-01`;
               const toStr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
@@ -806,10 +915,10 @@ export default function App() {
             }}>Bulan ini</button>
           </div>
 
-          <div className="section" style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 12 }}>
-            <div className="btn"><b>Omzet</b><br />{IDR(report.omzet)}</div>
-            <div className="btn"><b>Transaksi</b><br />{report.trx}</div>
-            <div className="btn"><b>AOV</b><br />{IDR(report.aov)}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 12 }}>
+            <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Omzet</b><br />{IDR(report.omzet)}</div>
+            <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Transaksi</b><br />{report.trx}</div>
+            <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>AOV</b><br />{IDR(report.aov)}</div>
           </div>
 
           <h3 style={{ marginTop: 16 }}>Top Produk</h3>
@@ -818,29 +927,46 @@ export default function App() {
               {report.top.map(t => <li key={t.name}>{t.name} — {t.qty} cup</li>)}
             </ul>
           )}
+        </main>
+      )}
 
-          <h3 style={{ marginTop: 16 }}>Stok Rendah</h3>
-          <ul>
-            {ingredients
-              .filter(i => i.stock <= (settingsDoc.lowStockThreshold || 10))
-              .map(i => <li key={i.id}>{i.name}: {i.stock} {i.unit}</li>)}
-          </ul>
+      {/* Owner Dashboard (tren + stok kritis) */}
+      {tab === "dashboard" && isAdmin && (
+        <DashboardView outletId={outletId} report={report} from={from} to={to} onRefresh={loadReport} ingredients={ingredients} />
+      )}
+
+      {/* Loyalty page (QR pelanggan) */}
+      {tab === "loyalty" && isAdmin && (
+        <main style={{ marginTop: 12 }}>
+          <h2>Digital Loyalty Card (Preview)</h2>
+          <p>Masukkan nomor HP pelanggan di tab POS → bagian loyalty. Halaman pelanggan:</p>
+          <code style={{ display:"block", wordBreak:"break-all", background:"#f8f8f8", padding:8, borderRadius:6 }}>
+            {customerPhone ? loyaltyUrl : "(isi No HP dulu di POS)"}
+          </code>
+          {customerPhone && (
+            <div style={{ marginTop: 10 }}>
+              <img src={loyaltyQR} alt="QR Pelanggan" />
+              <p style={{ fontSize:12, opacity:.7 }}>*QR ini menggunakan generator publik. Kamu bisa ganti ke generator lokal nanti.</p>
+            </div>
+          )}
         </main>
       )}
     </div>
   );
 }
 
-// ---------------- Sub-Komponen ----------------
+// ===================================================================================
+// Sub-Komponen
+// ===================================================================================
 
 function ProductManager({ products, onChange }: { products: Product[]; onChange: (x: Product[]) => void }) {
-  const [form, setForm] = useState<Product>({ id: 0, name: "", price: 0, active: true });
+  const [form, setForm] = useState<Product>({ id: 0, name: "", price: 0, active: true, category: "Signature" });
 
   async function save() {
     if (!form.id || !form.name || !form.price) return alert("ID, Nama, dan Harga wajib diisi!");
     await upsertProduct(form);
     onChange(await fetchProducts());
-    setForm({ id: 0, name: "", price: 0, active: true });
+    setForm({ id: 0, name: "", price: 0, active: true, category: "Signature" });
   }
 
   async function del(p: Product) {
@@ -854,15 +980,16 @@ function ProductManager({ products, onChange }: { products: Product[]; onChange:
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
         <input placeholder="ID (unik angka)" type="number" value={form.id || ""} onChange={(e) => setForm({ ...form, id: Number(e.target.value) })} />
         <input placeholder="Nama" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <input placeholder="Kategori" value={form.category || ""} onChange={(e) => setForm({ ...form, category: e.target.value })} />
         <input placeholder="Harga" type="number" value={form.price || 0} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} />
-        <button className="btn" onClick={save}>Simpan</button>
+        <button onClick={save}>Simpan</button>
       </div>
       {products.map((p) => (
         <div key={p.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
           <span>{p.name} — {IDR(p.price)}</span>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn" onClick={() => setForm(p)}>Edit</button>
-            <button className="btn" onClick={() => del(p)}>Hapus</button>
+            <button onClick={() => setForm(p)}>Edit</button>
+            <button onClick={() => del(p)}>Hapus</button>
           </div>
         </div>
       ))}
@@ -870,13 +997,15 @@ function ProductManager({ products, onChange }: { products: Product[]; onChange:
   );
 }
 
-function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredient[]; onChange: (x: InvIngredient[]) => void }) {
+function InventoryManager({ ingredients, onChange, outletId }: { ingredients: InvIngredient[]; onChange: (x: InvIngredient[]) => void; outletId: string }) {
   const [form, setForm] = useState<InvIngredient>({ name: "", unit: "", stock: 0 });
+  const webhook = (import.meta as any).env?.VITE_SHEETS_WEBHOOK || "";
 
   async function save() {
     if (!form.name) return alert("Nama bahan wajib diisi!");
     await upsertIngredient(form);
     onChange(await fetchIngredients());
+    if (webhook) { try { fetch(webhook, { method: "POST", body: JSON.stringify({ type:"stock_upsert", outletId, ...form }) }); } catch {} }
     setForm({ name: "", unit: "", stock: 0 });
   }
 
@@ -884,6 +1013,7 @@ function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredien
     if (!confirm(`Hapus ${i.name}?`)) return;
     await deleteIngredient(i.id!);
     onChange(await fetchIngredients());
+    if (webhook) { try { fetch(webhook, { method: "POST", body: JSON.stringify({ type:"stock_delete", outletId, id:i.id }) }); } catch {} }
   }
 
   async function adjustItem(i: InvIngredient, delta: number) {
@@ -891,6 +1021,7 @@ function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredien
     const newStock = current + delta;
     await adjustStock([{ ingredientId: String(i.id), newStock, note: delta > 0 ? `+${delta}` : `${delta}` }]);
     onChange(await fetchIngredients());
+    if (webhook) { try { fetch(webhook, { method: "POST", body: JSON.stringify({ type:"stock_adjust", outletId, id:i.id, delta }) }); } catch {} }
   }
 
   return (
@@ -899,17 +1030,17 @@ function InventoryManager({ ingredients, onChange }: { ingredients: InvIngredien
         <input placeholder="Nama bahan" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         <input placeholder="Satuan (ml/gr/pcs)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
         <input placeholder="Stok awal" type="number" value={form.stock || 0} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} />
-        <button className="btn" onClick={save}>Simpan</button>
+        <button onClick={save}>Simpan</button>
       </div>
 
       {ingredients.map((i) => (
         <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
           <span>{i.name} ({i.stock} {i.unit})</span>
           <div style={{ display: "flex", gap: 6 }}>
-            <button className="btn" onClick={() => adjustItem(i, 1)}>+1</button>
-            <button className="btn" onClick={() => adjustItem(i, -1)}>-1</button>
-            <button className="btn" onClick={() => setForm(i)}>Edit</button>
-            <button className="btn" onClick={() => del(i)}>Hapus</button>
+            <button onClick={() => adjustItem(i, 1)}>+1</button>
+            <button onClick={() => adjustItem(i, -1)}>-1</button>
+            <button onClick={() => setForm(i)}>Edit</button>
+            <button onClick={() => del(i)}>Hapus</button>
           </div>
         </div>
       ))}
@@ -983,10 +1114,63 @@ function RecipeManager({
               <small>{i.unit}</small>
             </div>
           ))}
-          <button className="btn" onClick={saveRecipe}>Simpan Resep</button>
+          <button onClick={saveRecipe}>Simpan Resep</button>
         </>
       )}
     </div>
+  );
+}
+
+function DashboardView({
+  outletId, report, from, to, onRefresh, ingredients
+}: {
+  outletId: string;
+  report: { omzet: number; trx: number; aov: number; top: { name: string; qty: number }[], trend: { d: string; amt: number }[] };
+  from: string; to: string; onRefresh: () => void;
+  ingredients: InvIngredient[];
+}) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    const labels = report.trend.map(t => t.d.slice(5)); // MM-DD
+    const data = report.trend.map(t => t.amt);
+    drawLineChart(ref.current, labels, data);
+  }, [report]);
+
+  return (
+    <main style={{ marginTop: 12 }}>
+      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+        <h2>Owner Dashboard — {outletId}</h2>
+        <button onClick={onRefresh}>Refresh</button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 12 }}>
+        <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Omzet</b><br />{IDR(report.omzet)}</div>
+        <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Transaksi</b><br />{report.trx}</div>
+        <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>AOV</b><br />{IDR(report.aov)}</div>
+      </div>
+
+      <h3 style={{ marginTop: 16 }}>Tren Harian</h3>
+      <div style={{ width: "100%", height: 180, border: "1px solid #eee", borderRadius: 8, padding: 6 }}>
+        <canvas ref={ref} style={{ width: "100%", height: 160 }} />
+      </div>
+
+      <h3 style={{ marginTop: 16 }}>Top Produk</h3>
+      {report.top.length === 0 ? <p>-</p> : (
+        <ol>
+          {report.top.map(t => <li key={t.name}>{t.name} — {t.qty} cup</li>)}
+        </ol>
+      )}
+
+      <h3 style={{ marginTop: 16 }}>Stok Kritis</h3>
+      <ul>
+        {ingredients.filter(i => (i.stock || 0) <= 10).map(i => (
+          <li key={i.id}>{i.name}: {i.stock} {i.unit}</li>
+        ))}
+      </ul>
+
+      <p style={{ fontSize: 12, opacity:.7 }}>Periode: {from || "(pilih)"} s/d {to || "(pilih)"} — gunakan tab <b>Laporan</b> untuk set tanggal</p>
+    </main>
   );
 }
 
