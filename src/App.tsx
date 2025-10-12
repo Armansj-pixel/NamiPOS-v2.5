@@ -58,6 +58,7 @@ type Sale = {
   id?: string;
   time: string;
   cashier: string;
+  shiftId?: string | null;
   items: CartItem[];
   subtotal: number;
   discount: number;
@@ -74,6 +75,27 @@ type Sale = {
   customerName?: string | null;
   pointsEarned?: number;
   loyaltyUrl?: string | null;
+};
+
+type Shift = {
+  id?: string;
+  outlet: string;
+  open: boolean;
+  openedBy: string;
+  openTime: string; // ISO
+  openingCash: number;
+  closedBy?: string | null;
+  closeTime?: string | null; // ISO
+  closingCash?: number | null;
+  totals?: {
+    cash: number;
+    ewallet: number;
+    salesCount: number;
+    revenue: number;
+    expectedCash: number; // openingCash + cash - payout (payout belum dipakai)
+    difference: number;   // closingCash - expectedCash
+  };
+  note?: string | null;
 };
 
 /* ========== Helper: sanitasi Firestore ========== */
@@ -144,9 +166,9 @@ export default function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
-  /* Tabs */
+  /* Tabs (Dashboard ditambahkan) */
   const [tab, setTab] = useState<
-    "pos" | "history" | "products" | "inventory" | "settings"
+    "pos" | "history" | "products" | "inventory" | "settings" | "dashboard"
   >("pos");
 
   /* POS State */
@@ -165,9 +187,12 @@ export default function App() {
   const [customerKnown, setCustomerKnown] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
 
-  /* History */
+  /* History & Dashboard data */
   const [sales, setSales] = useState<Sale[]>([]);
   const [loading, setLoading] = useState(false);
+
+  /* Shift */
+  const [activeShift, setActiveShift] = useState<Shift | null>(null);
 
   /* Derived totals */
   const subtotal = cart.reduce((s, i) => s + i.price * i.qty, 0);
@@ -199,7 +224,68 @@ export default function App() {
   useEffect(() => {
     loadProducts();
     loadIngredients();
+    loadActiveShift();
   }, []);
+
+  /* Helpers tanggal & loader khusus Dashboard */
+  function startOfDay(d = new Date()) {
+    const x = new Date(d); x.setHours(0,0,0,0); return x;
+  }
+  function startOfWeek(d = new Date()) {
+    const x = startOfDay(d);
+    const day = x.getDay(); // 0 Minggu
+    const diff = (day + 6) % 7; // Senin awal
+    x.setDate(x.getDate() - diff);
+    return x;
+  }
+  function startOfMonth(d = new Date()) {
+    const x = startOfDay(d); x.setDate(1); return x;
+  }
+  async function loadSalesLastNDays(days: number) {
+    setLoading(true);
+    try {
+      const since = new Date();
+      since.setDate(since.getDate() - days);
+      const qy = query(
+        collection(db, "sales"),
+        where("outlet", "==", OUTLET),
+        where("time", ">=", since.toISOString()),
+        orderBy("time", "desc")
+      );
+      const snap = await getDocs(qy);
+      setSales(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Sale[]);
+    } finally {
+      setLoading(false);
+    }
+  }
+  function lastNDates(n: number) {
+    const out: string[] = [];
+    const d = new Date();
+    for (let i = n - 1; i >= 0; i--) {
+      const x = new Date(d);
+      x.setDate(d.getDate() - i);
+      x.setHours(0, 0, 0, 0);
+      out.push(x.toISOString().slice(0, 10));
+    }
+    return out;
+  }
+  function buildDailySeries(data: Sale[], days = 14) {
+    const keys = lastNDates(days);
+    const revenueMap: Record<string, number> = {};
+    const cupsMap: Record<string, number> = {};
+    for (const k of keys) { revenueMap[k] = 0; cupsMap[k] = 0; }
+    for (const s of data) {
+      const day = (s.time || "").slice(0, 10);
+      if (!revenueMap.hasOwnProperty(day)) continue;
+      revenueMap[day] += Number(s.total || 0);
+      cupsMap[day] += s.items?.reduce((sum, i) => sum + (i.qty || 0), 0) || 0;
+    }
+    return {
+      labels: keys.map((k) => k.slice(5)),
+      revenue: keys.map((k) => revenueMap[k]),
+      cups: keys.map((k) => cupsMap[k]),
+    };
+  }
 
   /* Loyalty lookup (debounce) */
   useEffect(() => {
@@ -229,6 +315,132 @@ export default function App() {
     }, 400);
     return () => clearTimeout(t);
   }, [customerPhone]);
+
+  /* Shift helpers */
+  async function loadActiveShift() {
+    const qy = query(collection(db, "shifts"), where("outlet", "==", OUTLET), where("open", "==", true));
+    const snap = await getDocs(qy);
+    const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Shift[];
+    setActiveShift(list[0] || null);
+  }
+  async function openShift() {
+    if (activeShift) return alert("Shift masih terbuka.");
+    const input = prompt("Kas awal (Rp) untuk membuka shift:", "0");
+    if (input === null) return;
+    const openingCash = Number(input) || 0;
+    const payload: Shift = {
+      outlet: OUTLET,
+      open: true,
+      openedBy: user?.email || "-",
+      openTime: new Date().toISOString(),
+      openingCash,
+      closedBy: null,
+      closeTime: null,
+      closingCash: null,
+      note: null,
+    };
+    const ref = await addDoc(collection(db, "shifts"), cleanForFirestore(payload));
+    setActiveShift({ ...payload, id: ref.id });
+    alert("Shift dibuka ✅");
+  }
+  function sum(arr: number[]) { return arr.reduce((a, b) => a + b, 0); }
+  async function closeShift() {
+    if (!activeShift) return alert("Belum ada shift aktif.");
+    // Ambil semua sales di shift ini (pakai time range)
+    const startISO = activeShift.openTime;
+    const snap = await getDocs(
+      query(
+        collection(db, "sales"),
+        where("outlet", "==", OUTLET),
+        where("time", ">=", startISO),
+        orderBy("time", "asc")
+      )
+    );
+    const list = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Sale[];
+    const cashSum = sum(list.filter(s => s.method === "cash").map(s => s.total || 0));
+    const ewalletSum = sum(list.filter(s => s.method === "ewallet").map(s => s.total || 0));
+    const revenue = sum(list.map(s => s.total || 0));
+    const expectedCash = (activeShift.openingCash || 0) + cashSum; // payout belum dihitung
+    const closingStr = prompt(
+      `Kas akhir (Rp)?\nKas awal: ${IDR(activeShift.openingCash || 0)}\nPenjualan cash: ${IDR(cashSum)}\nPerkiraan kas: ${IDR(expectedCash)}`,
+      String(expectedCash)
+    );
+    if (closingStr === null) return;
+    const closingCash = Number(closingStr) || 0;
+    const note = prompt("Catatan penutupan (opsional):", "") || "";
+
+    const update: Partial<Shift> = {
+      open: false,
+      closedBy: user?.email || "-",
+      closeTime: new Date().toISOString(),
+      closingCash,
+      note,
+      totals: {
+        cash: cashSum,
+        ewallet: ewalletSum,
+        salesCount: list.length,
+        revenue,
+        expectedCash,
+        difference: closingCash - expectedCash,
+      },
+    };
+    // simpan
+    await setDoc(doc(db, "shifts", activeShift.id!), cleanForFirestore(update), { merge: true });
+    // cetak Z report
+    printShiftReport({ ...activeShift, ...update } as Shift);
+    setActiveShift(null);
+    alert("Shift ditutup ✅");
+  }
+
+  function printShiftReport(s: Shift) {
+    const w = window.open("", "_blank", "width=420,height=700");
+    if (!w) return;
+    const openTimeStr = new Date(s.openTime).toLocaleString("id-ID", { hour12:false });
+    const closeTimeStr = s.closeTime ? new Date(s.closeTime).toLocaleString("id-ID", { hour12:false }) : "-";
+    const t = s.totals || { cash:0, ewallet:0, salesCount:0, revenue:0, expectedCash:0, difference:0 };
+    const html = `
+<!doctype html><html><head><meta charset="utf-8"><title>Shift Z Report</title>
+<style>
+  @media print { @page { size: 80mm auto; margin: 0; } body{margin:0} }
+  body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .wrap { width: 76mm; margin: 0 auto; padding: 3mm; }
+  h2 { margin: 4px 0; text-align: center; font-size: 14px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 3px 0; font-size: 12px; }
+  .meta { font-size: 11px; text-align: center; opacity: .8; }
+  .logo { display:block;margin:0 auto 6px auto;width:36mm;height:auto;image-rendering:pixelated; }
+  .line { border-top:1px dashed #ccc; margin:6px 0}
+  .row { display:flex; justify-content:space-between; font-size:12px; }
+</style></head>
+<body>
+  <div class="wrap">
+    <img src="/logo.png" class="logo" onerror="this.style.display='none'"/>
+    <h2>${SHOP_NAME} — Shift Report</h2>
+    <div class="meta">${OUTLET}</div>
+    <div class="line"></div>
+    <div class="row"><span>Opened by</span><b>${s.openedBy}</b></div>
+    <div class="row"><span>Open</span><b>${openTimeStr}</b></div>
+    <div class="row"><span>Kas Awal</span><b>${IDR(s.openingCash || 0)}</b></div>
+    <div class="line"></div>
+    <div class="row"><span>Closed by</span><b>${s.closedBy || "-"}</b></div>
+    <div class="row"><span>Close</span><b>${closeTimeStr}</b></div>
+    <div class="row"><span>Kas Akhir</span><b>${IDR(s.closingCash || 0)}</b></div>
+    <div class="line"></div>
+    <div class="row"><span>Penjualan (Cash)</span><b>${IDR(t.cash)}</b></div>
+    <div class="row"><span>Penjualan (E-Wallet)</span><b>${IDR(t.ewallet)}</b></div>
+    <div class="row"><span>Transaksi</span><b>${t.salesCount}</b></div>
+    <div class="row"><span>Total Revenue</span><b>${IDR(t.revenue)}</b></div>
+    <div class="line"></div>
+    <div class="row"><span>Perkiraan Kas</span><b>${IDR(t.expectedCash)}</b></div>
+    <div class="row"><span>Selisih</span><b>${IDR(t.difference)}</b></div>
+    ${s.note ? `<div class="line"></div><div style="font-size:11px">Catatan: ${s.note}</div>` : ""}
+    <p class="meta" style="margin-top:6px">Terima kasih — ${SHOP_NAME}</p>
+  </div>
+  <script>window.print()</script>
+</body></html>`;
+    w.document.write(html);
+    w.document.close();
+  }
 
   /* POS helpers */
   function addToCart(p: Product) {
@@ -385,6 +597,7 @@ export default function App() {
 
   /* FINALIZE — print dulu baru simpan (hindari popup blocked) */
   const finalize = async () => {
+    if (!activeShift) return alert("Buka shift dulu sebelum transaksi.");
     if (cart.length === 0) return alert("Keranjang kosong.");
     if (method === "cash" && cash < total) return alert("Uang tunai kurang.");
 
@@ -394,7 +607,6 @@ export default function App() {
     }
     const pointsEarned = useLoyalty ? cart.reduce((s, i) => s + i.qty, 0) : 0;
 
-    // state CartItem harus pakai undefined untuk note (bukan null)
     const itemsSafe: CartItem[] = cart.map((ci) => ({
       productId: ci.productId,
       name: ci.name,
@@ -406,6 +618,7 @@ export default function App() {
     const s: Sale = {
       time: new Date().toISOString(),
       cashier: user?.email || "-",
+      shiftId: activeShift?.id || null,
       items: itemsSafe,
       subtotal,
       discount,
@@ -435,11 +648,7 @@ export default function App() {
     try {
       const payload = cleanForFirestore({
         ...s,
-        // map note undefined -> null di Firestore
-        items: s.items.map((i) => ({
-          ...i,
-          note: i.note ?? null,
-        })),
+        items: s.items.map((i) => ({ ...i, note: i.note ?? null })),
         createdAt: serverTimestamp(),
       });
       const ref = await addDoc(collection(db, "sales"), payload);
@@ -476,6 +685,8 @@ export default function App() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
+        </div>
+        <div style={card}>
           <input
             placeholder="Password"
             type="password"
@@ -503,6 +714,26 @@ export default function App() {
     );
   }
 
+  /* ======= Dashboard data basis ======= */
+  const now = new Date();
+  const t0 = startOfDay(now).toISOString();
+  const w0 = startOfWeek(now).toISOString();
+  const m0 = startOfMonth(now).toISOString();
+  const sumFast = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
+
+  const todaySales   = sales.filter((s) => s.time >= t0);
+  const weekSales    = sales.filter((s) => s.time >= w0);
+  const monthSales   = sales.filter((s) => s.time >= m0);
+
+  const todayRevenue = sumFast(todaySales.map((s) => s.total || 0));
+  const weekRevenue  = sumFast(weekSales.map((s) => s.total || 0));
+  const monthRevenue = sumFast(monthSales.map((s) => s.total || 0));
+
+  const todayCups = sumFast(todaySales.flatMap((s) => s.items.map((i) => i.qty || 0)));
+  const weekCups  = sumFast(weekSales.flatMap((s) => s.items.map((i) => i.qty || 0)));
+  const monthCups = sumFast(monthSales.flatMap((s) => s.items.map((i) => i.qty || 0)));
+
+  /* Render */
   return (
     <div style={wrap}>
       <InlineStyle />
@@ -521,6 +752,23 @@ export default function App() {
           </div>
         </div>
         <div className="hdrR">
+          {/* Shift status */}
+          {activeShift ? (
+            <span style={{ fontSize: 12, padding: "4px 8px", border: "1px solid #16a34a", borderRadius: 999, background: "#ecfdf5", color: "#065f46" }}>
+              Shift OPEN — {new Date(activeShift.openTime).toLocaleTimeString("id-ID", { hour12:false })} by {activeShift.openedBy}
+            </span>
+          ) : (
+            <span style={{ fontSize: 12, padding: "4px 8px", border: "1px solid #eab308", borderRadius: 999, background: "#fffbeb", color: "#854d0e" }}>
+              Shift CLOSED
+            </span>
+          )}
+          {/* Shift actions */}
+          {!activeShift ? (
+            <button onClick={openShift}>Buka Shift</button>
+          ) : (
+            <button onClick={closeShift}>Tutup Shift</button>
+          )}
+
           <small>
             Masuk: {user.email} {isAdmin ? "(owner)" : "(staff)"}
           </small>
@@ -533,6 +781,19 @@ export default function App() {
           >
             Riwayat
           </button>
+
+          {/* 🔒 Dashboard hanya untuk admin */}
+          {isAdmin && (
+            <button
+              onClick={() => {
+                setTab("dashboard");
+                loadSalesLastNDays(60);
+              }}
+            >
+              Dashboard
+            </button>
+          )}
+
           <button onClick={() => setTab("products")}>Produk</button>
           <button onClick={() => setTab("inventory")}>Inventori</button>
           <button onClick={() => setTab("settings")}>Pengaturan</button>
@@ -730,9 +991,13 @@ export default function App() {
                 <tbody>
                   {sales.map((s) => (
                     <tr key={s.id}>
-                      <td className="td">{new Date(s.time).toLocaleString("id-ID", { hour12: false })}</td>
+                      <td className="td">
+                        {new Date(s.time).toLocaleString("id-ID", { hour12: false })}
+                      </td>
                       <td className="td">{s.id}</td>
-                      <td className="td">{s.items.map((i) => `${i.name} x${i.qty}`).join(", ")}</td>
+                      <td className="td">
+                        {s.items.map((i) => `${i.name} x${i.qty}`).join(", ")}
+                      </td>
                       <td className="tdR">{IDR(s.total)}</td>
                     </tr>
                   ))}
@@ -743,14 +1008,50 @@ export default function App() {
         </div>
       )}
 
+      {/* 🔒 Dashboard (hanya admin) */}
+      {tab === "dashboard" && (
+        isAdmin ? (
+          <DashboardCard
+            loading={loading}
+            sales={sales}
+            products={products}
+            ingredients={ingredients}
+            buildDailySeries={buildDailySeries}
+          />
+        ) : (
+          <div style={{ ...card, marginTop: 12 }}>
+            <h3>Akses Ditolak</h3>
+            <p style={{ opacity: 0.7 }}>
+              Dashboard hanya bisa diakses oleh owner atau admin terdaftar.
+            </p>
+          </div>
+        )
+      )}
+
       {/* Products */}
       {tab === "products" && (
         <ProductsCard
           isAdmin={isAdmin}
           products={products}
           ingredients={ingredients}
-          onSave={saveProduct}
-          onDelete={deleteProductById}
+          onSave={async (p) => {
+            if (!isAdmin) return alert("Hanya admin yang dapat menyimpan produk.");
+            if (!p.name || p.price <= 0) return alert("Nama & harga wajib diisi.");
+            if (p.id) {
+              const ref = doc(db, "products", p.id);
+              await setDoc(ref, cleanForFirestore(p), { merge: true });
+            } else {
+              await addDoc(collection(db, "products"), cleanForFirestore(p));
+            }
+            await loadProducts();
+            alert("Produk tersimpan.");
+          }}
+          onDelete={async (id) => {
+            if (!isAdmin) return alert("Hanya admin yang dapat menghapus produk.");
+            if (!confirm("Hapus produk ini?")) return;
+            await deleteDoc(doc(db, "products", id));
+            await loadProducts();
+          }}
         />
       )}
 
@@ -759,8 +1060,24 @@ export default function App() {
         <InventoryCard
           isAdmin={isAdmin}
           ingredients={ingredients}
-          onSave={saveIngredient}
-          onDelete={deleteIngredientById}
+          onSave={async (ing) => {
+            if (!isAdmin) return alert("Hanya admin yang dapat menyimpan inventori.");
+            if (!ing.name) return alert("Nama bahan wajib diisi.");
+            if (ing.id) {
+              const ref = doc(db, "ingredients", ing.id);
+              await setDoc(ref, cleanForFirestore(ing), { merge: true });
+            } else {
+              await addDoc(collection(db, "ingredients"), cleanForFirestore(ing));
+            }
+            await loadIngredients();
+            alert("Inventori tersimpan.");
+          }}
+          onDelete={async (id) => {
+            if (!isAdmin) return alert("Hanya admin yang dapat menghapus inventori.");
+            if (!confirm("Hapus bahan ini?")) return;
+            await deleteDoc(doc(db, "ingredients", id));
+            await loadIngredients();
+          }}
         />
       )}
 
@@ -829,7 +1146,7 @@ function ProductsCard({
     <div style={{ ...card, marginTop: 12 }}>
       <div className="hdrTbl">
         <h3>Produk</h3>
-        <button onClick={() => setForm(empty)}>Produk Baru</button>
+        <button disabled={!isAdmin} onClick={() => setForm(empty)}>Produk Baru</button>
       </div>
 
       <div className="prodGrid">
@@ -865,7 +1182,7 @@ function ProductsCard({
       <div className="recipeBox">
         <div className="hdrTbl">
           <b>Recipe (Inventori)</b>
-          <button onClick={addRecipeRow}>+ Bahan</button>
+          <button disabled={!isAdmin} onClick={addRecipeRow}>+ Bahan</button>
         </div>
         {(form.recipe || []).length === 0 ? (
           <p style={{ opacity: 0.7 }}>Belum ada bahan.</p>
@@ -877,6 +1194,7 @@ function ProductsCard({
                   style={input}
                   value={r.ingredientId}
                   onChange={(e) => updateRecipe(idx, { ingredientId: e.target.value })}
+                  disabled={!isAdmin}
                 >
                   {ingredients.map((ing) => (
                     <option key={ing.id} value={ing.id}>
@@ -891,8 +1209,9 @@ function ProductsCard({
                   step="0.01"
                   value={r.qty}
                   onChange={(e) => updateRecipe(idx, { qty: Number(e.target.value) || 0 })}
+                  disabled={!isAdmin}
                 />
-                <button onClick={() => rmRecipe(idx)}>Hapus</button>
+                <button disabled={!isAdmin} onClick={() => rmRecipe(idx)}>Hapus</button>
               </React.Fragment>
             ))}
           </div>
@@ -930,8 +1249,8 @@ function ProductsCard({
                 <td className="tdR">{IDR(p.price)}</td>
                 <td className="td">{p.active !== false ? "Ya" : "Tidak"}</td>
                 <td className="tdR">
-                  <button onClick={() => setForm(p)}>Edit</button>
-                  <button onClick={() => onDelete(p.id!)} style={{ marginLeft: 6 }}>
+                  <button disabled={!isAdmin} onClick={() => setForm(p)}>Edit</button>
+                  <button disabled={!isAdmin} onClick={() => onDelete(p.id!)} style={{ marginLeft: 6 }}>
                     Hapus
                   </button>
                 </td>
@@ -963,7 +1282,7 @@ function InventoryCard({
     <div style={{ ...card, marginTop: 12 }}>
       <div className="hdrTbl">
         <h3>Inventori</h3>
-        <button onClick={() => setForm(empty)}>Bahan Baru</button>
+        <button disabled={!isAdmin} onClick={() => setForm(empty)}>Bahan Baru</button>
       </div>
 
       <div className="invGrid">
@@ -1020,8 +1339,8 @@ function InventoryCard({
                 <td className="tdR">{i.stock}</td>
                 <td className="tdR">{i.low || 0}</td>
                 <td className="tdR">
-                  <button onClick={() => setForm(i)}>Edit</button>
-                  <button onClick={() => onDelete(i.id!)} style={{ marginLeft: 6 }}>
+                  <button disabled={!isAdmin} onClick={() => setForm(i)}>Edit</button>
+                  <button disabled={!isAdmin} onClick={() => onDelete(i.id!)} style={{ marginLeft: 6 }}>
                     Hapus
                   </button>
                 </td>
@@ -1030,6 +1349,212 @@ function InventoryCard({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/* ============== Dashboard Card + Chart & Export ============== */
+function DashboardCard({
+  loading,
+  sales,
+  products,
+  ingredients,
+  buildDailySeries,
+}: {
+  loading: boolean;
+  sales: Sale[];
+  products: Product[];
+  ingredients: Ingredient[];
+  buildDailySeries: (data: Sale[], days?: number) => { labels: string[]; revenue: number[]; cups: number[] };
+}) {
+  const now = new Date();
+  const startOfDayIso = new Date(new Date(now).setHours(0,0,0,0)).toISOString();
+  const startOfWeek = (() => { const d = new Date(now); d.setHours(0,0,0,0); const diff=(d.getDay()+6)%7; d.setDate(d.getDate()-diff); return d;})();
+  const startOfMonth = (() => { const d=new Date(now); d.setHours(0,0,0,0); d.setDate(1); return d;})();
+  const weekIso = startOfWeek.toISOString();
+  const monthIso = startOfMonth.toISOString();
+  const sum = (a:number[]) => a.reduce((x,y)=>x+y,0);
+
+  const todaySales   = sales.filter(s=>s.time>=startOfDayIso);
+  const weekSales    = sales.filter(s=>s.time>=weekIso);
+  const monthSales   = sales.filter(s=>s.time>=monthIso);
+  const todayRevenue = sum(todaySales.map(s=>s.total||0));
+  const weekRevenue  = sum(weekSales.map(s=>s.total||0));
+  const monthRevenue = sum(monthSales.map(s=>s.total||0));
+  const todayCups    = sum(todaySales.flatMap(s=>s.items.map(i=>i.qty||0)));
+  const weekCups     = sum(weekSales.flatMap(s=>s.items.map(i=>i.qty||0)));
+  const monthCups    = sum(monthSales.flatMap(s=>s.items.map(i=>i.qty||0)));
+
+  const labels = buildDailySeries(sales, 14);
+
+  // Top Produk
+  const qtyByProduct: Record<string, number> = {};
+  for (const s of sales) for (const it of s.items) {
+    qtyByProduct[it.name] = (qtyByProduct[it.name] || 0) + (it.qty || 0);
+  }
+  const topProducts = Object.entries(qtyByProduct).sort((a,b)=>b[1]-a[1]).slice(0,8);
+
+  // Low Stock
+  const lowList = [...ingredients].filter(i=>i.stock <= (i.low || 0)).sort((a,b)=>(a.stock-(a.low||0))-(b.stock-(b.low||0)));
+
+  return (
+    <div style={{ ...card, marginTop: 12 }}>
+      <div className="hdrTbl">
+        <h3>Dashboard Owner</h3>
+        {loading ? <small>Memuat…</small> : <small>Terakhir: {new Date().toLocaleString("id-ID", { hour12:false })}</small>}
+      </div>
+
+      {/* KPI */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(180px,1fr))", gap:12, marginTop:8 }}>
+        <KPI title="Pendapatan Hari Ini" value={IDR(todayRevenue)} sub={`${todaySales.length} trx / ${todayCups} cup`} />
+        <KPI title="Pendapatan Minggu Ini" value={IDR(weekRevenue)} sub={`${weekSales.length} trx / ${weekCups} cup`} />
+        <KPI title="Pendapatan Bulan Ini" value={IDR(monthRevenue)} sub={`${monthSales.length} trx / ${monthCups} cup`} />
+      </div>
+
+      {/* Grafik harian */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginTop:12 }}>
+        <MiniBarChart title="Pendapatan Harian (14 hari)" labels={labels.labels} values={labels.revenue} />
+        <MiniBarChart title="Cup Terjual / Hari (14 hari)" labels={labels.labels} values={labels.cups} />
+      </div>
+
+      {/* Export */}
+      <div style={{ marginTop:12 }}>
+        <button onClick={() => exportDashboardCSV(labels)} style={{ border:"1px solid #2e7d32", background:"#2e7d32", color:"#fff", padding:"8px 12px", borderRadius:10 }}>
+          Export Dashboard CSV
+        </button>
+      </div>
+
+      {/* Top Produk & Low Stock */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginTop:12 }}>
+        <div style={card}>
+          <h4 style={{marginTop:0}}>Top Produk (by qty)</h4>
+          {topProducts.length===0 ? (
+            <p style={{opacity:.7}}>Belum ada data.</p>
+          ) : (
+            <table className="tbl">
+              <thead>
+                <tr><th className="thL">Produk</th><th className="thR">Qty</th></tr>
+              </thead>
+              <tbody>
+                {topProducts.map(([name, qty]) => (
+                  <tr key={name}>
+                    <td className="td">{name}</td>
+                    <td className="tdR">{qty}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div style={card}>
+          <h4 style={{marginTop:0}}>Low Stock</h4>
+          {lowList.length===0 ? (
+            <p style={{opacity:.7}}>Aman. Tidak ada stok rendah.</p>
+          ) : (
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th className="thL">Bahan</th>
+                  <th className="thR">Stok</th>
+                  <th className="thR">Ambang</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lowList.map(i=>(
+                  <tr key={i.id}>
+                    <td className="td">{i.name} ({i.unit})</td>
+                    <td className="tdR">{i.stock}</td>
+                    <td className="tdR">{i.low || 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      {/* Ringkasan Transaksi Terbaru */}
+      <div style={{ marginTop:12 }}>
+        <h4 style={{marginTop:0}}>Transaksi Terbaru</h4>
+        {sales.length===0 ? (
+          <p style={{opacity:.7}}>Belum ada transaksi.</p>
+        ) : (
+          <div style={{ overflowX:"auto" }}>
+            <table className="tbl">
+              <thead>
+                <tr>
+                  <th className="thL">Waktu</th>
+                  <th className="thL">Metode</th>
+                  <th className="thR">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sales.slice(0,10).map(s=>(
+                  <tr key={s.id}>
+                    <td className="td">{new Date(s.time).toLocaleString("id-ID",{hour12:false})}</td>
+                    <td className="td">{s.method}</td>
+                    <td className="tdR">{IDR(s.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function KPI({title, value, sub}:{title:string; value:string; sub?:string}) {
+  return (
+    <div style={{ border:"1px solid #e5e7eb", borderRadius:12, padding:12, background:"#fafafa" }}>
+      <div style={{fontSize:12, opacity:.7}}>{title}</div>
+      <div style={{fontSize:20, fontWeight:700, margin:"2px 0 4px"}}>{value}</div>
+      {sub && <div style={{fontSize:12, opacity:.7}}>{sub}</div>}
+    </div>
+  );
+}
+
+function MiniBarChart({
+  title,
+  labels,
+  values,
+  height = 120,
+}: {
+  title: string;
+  labels: string[];
+  values: number[];
+  height?: number;
+}) {
+  const max = Math.max(1, ...values);
+  const barW = 20;
+  const gap = 6;
+  const width = values.length * (barW + gap) + gap;
+  return (
+    <div style={{ border: "1px solid #e5e7eb", borderRadius: 12, padding: 12 }}>
+      <div style={{ fontSize: 12, opacity: 0.7 }}>{title}</div>
+      <svg width={width} height={height} style={{ display: "block", marginTop: 6 }}>
+        <line x1={0} y1={height - 20} x2={width} y2={height - 20} stroke="#e5e7eb" />
+        {values.map((v, i) => {
+          const h = Math.round(((v || 0) / max) * (height - 40));
+          const x = gap + i * (barW + gap);
+          const y = height - 20 - h;
+          return (
+            <g key={i}>
+              <rect x={x} y={y} width={barW} height={h} fill="#2e7d32" rx="4" />
+            </g>
+          );
+        })}
+        {labels.map((l, i) => {
+          const x = gap + i * (barW + gap) + barW / 2;
+          return (
+            <text key={i} x={x} y={height - 6} fontSize="9" textAnchor="middle" fill="#6b7280">
+              {l}
+            </text>
+          );
+        })}
+      </svg>
     </div>
   );
 }
@@ -1096,16 +1621,18 @@ const input: React.CSSProperties = { border: "1px solid #e5e7eb", borderRadius: 
 const btnPrimary: React.CSSProperties = { border: "1px solid #2e7d32", background: "#2e7d32", color: "#fff", padding: "8px 12px", borderRadius: 10 };
 const btnDanger: React.CSSProperties = { border: "1px solid #e53935", background: "#e53935", color: "#fff", padding: "8px 12px", borderRadius: 10 };
 
-/* ============== Master CRUD funcs (di bawah agar komponen bisa pakai) ============== */
-async function saveProduct(p: Product) {
-  alert("Fungsi dummy — akan di-override di komponen utama."); // placeholder supaya TS tidak error saat hoisting
-}
-async function deleteProductById(id: string) {
-  alert("Fungsi dummy — akan di-override di komponen utama.");
-}
-async function saveIngredient(i: Ingredient) {
-  alert("Fungsi dummy — akan di-override di komponen utama.");
-}
-async function deleteIngredientById(id: string) {
-  alert("Fungsi dummy — akan di-override di komponen utama.");
+/* ============== Export CSV helper (Dashboard) ============== */
+function exportDashboardCSV(daily: { labels: string[]; revenue: number[]; cups: number[] }) {
+  const rows = [["Tanggal", "Pendapatan", "Cups"]];
+  for (let i = 0; i < daily.labels.length; i++) {
+    rows.push([daily.labels[i], String(daily.revenue[i]), String(daily.cups[i])]);
+  }
+  const csv = rows.map((r) => r.map((c) => `"${String(c).replaceAll(`"`, `""`)}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `dashboard_${new Date().toISOString().slice(0,10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
