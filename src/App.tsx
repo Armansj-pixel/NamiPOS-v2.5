@@ -1,29 +1,59 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { auth, db, IDR } from "./lib/firebase";
 import {
-  signInWithEmailAndPassword, onAuthStateChanged, signOut, User
+  signInWithEmailAndPassword,
+  onAuthStateChanged,
+  signOut,
+  User,
 } from "firebase/auth";
 import {
-  collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, deleteDoc,
-  query, where, orderBy, serverTimestamp, increment
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  increment,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+  where,
 } from "firebase/firestore";
 
-/* ================== KONFIG ================== */
+/* ================== KONFIGURASI ================== */
 const SHOP_NAME = "CHAFU MATCHA";
 const OUTLET = "@MTHaryono";
-const ADMIN_EMAILS = ["antonius.arman123@gmail.com", "ayuismaalabibbah@gmail.com"];
+const ADMIN_EMAILS = [
+  "antonius.arman123@gmail.com",
+  "ayuismaalabibbah@gmail.com",
+];
 
 /* ================== TYPES ================== */
+type RecipeItem = { ingredientId: string; qty: number };
 type Product = {
   id?: string;
   name: string;
   price: number;
   category: string;
   active?: boolean;
-  recipe?: { ingredientId: string; qty: number }[]; // per cup
+  recipe?: RecipeItem[]; // per cup
 };
-type Ingredient = { id?: string; name: string; unit: string; stock: number; low?: number };
-type CartItem = { productId: string; name: string; price: number; qty: number; note?: string };
+type Ingredient = {
+  id?: string;
+  name: string;
+  unit: string;
+  stock: number;
+  low?: number;
+};
+type CartItem = {
+  productId: string;
+  name: string;
+  price: number;
+  qty: number;
+  note?: string;
+};
 type Sale = {
   id?: string;
   time: string;
@@ -46,8 +76,10 @@ type Sale = {
   loyaltyUrl?: string | null;
 };
 
-/* ========= helper: bersihkan undefined ========= */
+/* ========== Helper: sanitasi payload untuk Firestore ========== */
 function cleanForFirestore<T>(value: T): T {
+  if (value === undefined) return null as T;
+  if (typeof value === "number" && !Number.isFinite(value)) return 0 as T;
   if (Array.isArray(value)) {
     return value.map((v) => cleanForFirestore(v)) as unknown as T;
   }
@@ -55,14 +87,15 @@ function cleanForFirestore<T>(value: T): T {
     const out: any = {};
     for (const [k, v] of Object.entries(value as any)) {
       if (v === undefined) continue;
+      if (typeof v === "number" && !Number.isFinite(v)) continue;
       out[k] = cleanForFirestore(v as any);
     }
     return out;
   }
-  return (value === undefined ? null : value) as T;
+  return value as T;
 }
 
-/* ================= LOYALTY ================== */
+/* ================== LOYALTY ================== */
 const ORIGIN = typeof window !== "undefined" ? window.location.origin : "";
 const loyaltyUrlFor = (phone: string) =>
   `${ORIGIN}/loyalty/?uid=${encodeURIComponent(phone.replace(/\D/g, ""))}`;
@@ -112,7 +145,9 @@ export default function App() {
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
   /* Tabs & POS */
-  const [tab, setTab] = useState<"pos" | "history" | "products" | "inventory" | "settings">("pos");
+  const [tab, setTab] = useState<
+    "pos" | "history" | "products" | "inventory" | "settings"
+  >("pos");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discount, setDiscount] = useState(0);
   const [taxRate, setTaxRate] = useState(0);
@@ -197,12 +232,22 @@ export default function App() {
   async function saveProduct(p: Product) {
     if (!isAdmin) return alert("Khusus owner/admin.");
     if (!p.name || p.price <= 0) return alert("Nama & harga wajib.");
+    const payload = {
+      name: p.name,
+      price: Number(p.price || 0),
+      category: p.category || "Signature",
+      active: p.active !== false,
+      recipe: (p.recipe || []).map((r) => ({
+        ingredientId: r.ingredientId || "",
+        qty: Number(r.qty || 0),
+      })),
+      updatedAt: serverTimestamp(),
+    };
     if (p.id) {
-      await setDoc(doc(db, "products", p.id), p as any, { merge: true });
+      await setDoc(doc(db, "products", p.id), payload as any, { merge: true });
     } else {
       await addDoc(collection(db, "products"), {
-        ...p,
-        active: p.active !== false,
+        ...payload,
         createdAt: serverTimestamp(),
       });
     }
@@ -221,7 +266,7 @@ export default function App() {
     if (!i.name) return alert("Nama bahan wajib.");
     const payload = {
       name: i.name,
-      unit: i.unit,
+      unit: i.unit || "gr",
       stock: Number(i.stock || 0),
       low: Number(i.low || 0),
       updatedAt: serverTimestamp(),
@@ -245,7 +290,10 @@ export default function App() {
     setCart((prev) => {
       const f = prev.find((x) => x.productId === p.id && (x.note || "") === (note || ""));
       if (f) return prev.map((x) => (x === f ? { ...x, qty: x.qty + 1 } : x));
-      return [...prev, { productId: p.id!, name: p.name, price: p.price, qty: 1, note: note || undefined }];
+      return [
+        ...prev,
+        { productId: p.id!, name: p.name, price: p.price, qty: 1, note: note || undefined },
+      ];
     });
   }
   function inc(i: number) {
@@ -278,15 +326,18 @@ export default function App() {
       if (!p?.recipe) continue;
       for (const r of p.recipe) {
         if (!r.ingredientId) continue;
-        need[r.ingredientId] = (need[r.ingredientId] || 0) + r.qty * ci.qty;
+        need[r.ingredientId] = (need[r.ingredientId] || 0) + Number(r.qty || 0) * ci.qty;
       }
     }
     for (const [ingId, qty] of Object.entries(need)) {
       const ref = doc(db, "ingredients", ingId);
       const snap = await getDoc(ref);
       if (!snap.exists()) continue;
-      const cur = (snap.data() as any).stock || 0;
-      await updateDoc(ref, { stock: Math.max(0, cur - qty), updatedAt: serverTimestamp() });
+      const cur = Number((snap.data() as any).stock || 0);
+      await updateDoc(ref, {
+        stock: Math.max(0, cur - Number(qty || 0)),
+        updatedAt: serverTimestamp(),
+      });
     }
   }
 
@@ -306,7 +357,9 @@ export default function App() {
       .join("");
 
     const qr = s.loyaltyUrl
-      ? `https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(s.loyaltyUrl)}`
+      ? `https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(
+          s.loyaltyUrl
+        )}`
       : "";
 
     const html = `
@@ -326,23 +379,57 @@ export default function App() {
   <div class="wrap">
     <img src="/logo.png" class="logo" onerror="this.style.display='none'"/>
     <h2>${SHOP_NAME}</h2>
-    <div class="meta">${OUTLET}<br/>Kasir: ${s.cashier}<br/>${new Date(s.time).toLocaleString("id-ID",{hour12:false})}</div>
+    <div class="meta">${OUTLET}<br/>Kasir: ${s.cashier}<br/>${new Date(s.time).toLocaleString(
+      "id-ID",
+      { hour12: false }
+    )}</div>
     <hr/>
     <table>${rows}
-      <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${s.subtotal.toLocaleString("id-ID")}</td></tr>
-      ${s.discount ? `<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${s.discount.toLocaleString("id-ID")}</td></tr>` : ""}
-      ${s.taxValue ? `<tr class="tot"><td>Pajak (${s.taxRate}%)</td><td></td><td style="text-align:right">${s.taxValue.toLocaleString("id-ID")}</td></tr>` : ""}
-      ${s.serviceValue ? `<tr class="tot"><td>Service (${s.serviceRate}%)</td><td></td><td style="text-align:right">${s.serviceValue.toLocaleString("id-ID")}</td></tr>` : ""}
-      <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${s.total.toLocaleString("id-ID")}</td></tr>
-      ${s.method === "cash"
-        ? `<tr><td>Tunai</td><td></td><td style="text-align:right">${s.cash.toLocaleString("id-ID")}</td></tr>
-           <tr><td>Kembali</td><td></td><td style="text-align:right">${s.change.toLocaleString("id-ID")}</td></tr>`
-        : `<tr><td>Pembayaran</td><td></td><td style="text-align:right">E-Wallet</td></tr>`
+      <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${s.subtotal.toLocaleString(
+        "id-ID"
+      )}</td></tr>
+      ${
+        s.discount
+          ? `<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${s.discount.toLocaleString(
+              "id-ID"
+            )}</td></tr>`
+          : ""
+      }
+      ${
+        s.taxValue
+          ? `<tr class="tot"><td>Pajak (${s.taxRate}%)</td><td></td><td style="text-align:right">${s.taxValue.toLocaleString(
+              "id-ID"
+            )}</td></tr>`
+          : ""
+      }
+      ${
+        s.serviceValue
+          ? `<tr class="tot"><td>Service (${s.serviceRate}%)</td><td></td><td style="text-align:right">${s.serviceValue.toLocaleString(
+              "id-ID"
+            )}</td></tr>`
+          : ""
+      }
+      <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${s.total.toLocaleString(
+        "id-ID"
+      )}</td></tr>
+      ${
+        s.method === "cash"
+          ? `<tr><td>Tunai</td><td></td><td style="text-align:right">${s.cash.toLocaleString(
+              "id-ID"
+            )}</td></tr>
+             <tr><td>Kembali</td><td></td><td style="text-align:right">${s.change.toLocaleString(
+               "id-ID"
+             )}</td></tr>`
+          : `<tr><td>Pembayaran</td><td></td><td style="text-align:right">E-Wallet</td></tr>`
       }
     </table>
-    ${qr ? `<div class="meta" style="margin:8px 0 2px">Scan untuk cek poin loyalty</div>
+    ${
+      qr
+        ? `<div class="meta" style="margin:8px 0 2px">Scan untuk cek poin loyalty</div>
             <img src="${qr}" style="display:block;margin:0 auto 4px auto"/>
-            <div class="meta" style="word-break:break-all;font-size:10px">${s.loyaltyUrl}</div>` : ""}
+            <div class="meta" style="word-break:break-all;font-size:10px">${s.loyaltyUrl}</div>`
+        : ""
+    }
     <p class="meta">Terima kasih! Follow @chafumatcha</p>
   </div>
   <script>window.print()</script>
@@ -351,7 +438,7 @@ export default function App() {
     w.document.close();
   }
 
-  /* FINALIZE — print dulu, baru async (hindari popup blocked) */
+  /* FINALIZE — print dulu, baru simpan (hindari popup blocked) */
   const finalize = async () => {
     if (cart.length === 0) return alert("Keranjang kosong.");
     if (method === "cash" && cash < total) return alert("Uang tunai kurang.");
@@ -365,8 +452,8 @@ export default function App() {
     const itemsSafe = cart.map((ci) => ({
       productId: ci.productId,
       name: ci.name,
-      price: ci.price,
-      qty: ci.qty,
+      price: Number(ci.price || 0),
+      qty: Number(ci.qty || 0),
       note: ci.note ?? null,
     }));
 
@@ -386,7 +473,11 @@ export default function App() {
       change: method === "cash" ? change : 0,
       outlet: OUTLET,
       customerPhone: useLoyalty ? customerPhone.trim() : null,
-      customerName: useLoyalty ? (customerKnown ? customerName : customerName.trim()) : null,
+      customerName: useLoyalty
+        ? customerKnown
+          ? customerName
+          : customerName.trim()
+        : null,
       pointsEarned: pointsEarned || 0,
       loyaltyUrl: useLoyalty ? loyaltyUrlFor(customerPhone) : null,
     };
@@ -394,14 +485,58 @@ export default function App() {
     // cetak dulu
     printReceipt80mm(s);
 
-    // simpan (bersihkan undefined)
+    // simpan (payload eksplisit + pembersihan)
     try {
-      const payload = cleanForFirestore(s);
-      const ref = await addDoc(collection(db, "sales"), { ...payload, createdAt: serverTimestamp() });
+      const basePayload = {
+        time: s.time,
+        cashier: s.cashier,
+        items: s.items.map((i) => ({
+          productId: i.productId ?? null,
+          name: i.name ?? null,
+          price: Number.isFinite(i.price) ? i.price : 0,
+          qty: Number.isFinite(i.qty) ? i.qty : 0,
+          note: i.note ?? null,
+        })),
+        subtotal: Number.isFinite(s.subtotal) ? s.subtotal : 0,
+        discount: Number.isFinite(s.discount) ? s.discount : 0,
+        taxRate: Number.isFinite(s.taxRate) ? s.taxRate : 0,
+        serviceRate: Number.isFinite(s.serviceRate) ? s.serviceRate : 0,
+        taxValue: Number.isFinite(s.taxValue) ? s.taxValue : 0,
+        serviceValue: Number.isFinite(s.serviceValue) ? s.serviceValue : 0,
+        total: Number.isFinite(s.total) ? s.total : 0,
+        method: s.method,
+        cash:
+          s.method === "cash"
+            ? Number.isFinite(s.cash)
+              ? s.cash
+              : 0
+            : 0,
+        change:
+          s.method === "cash"
+            ? Number.isFinite(s.change)
+              ? s.change
+              : 0
+            : 0,
+        outlet: s.outlet ?? OUTLET,
+        customerPhone: s.customerPhone ?? null,
+        customerName: s.customerName ?? null,
+        pointsEarned: Number.isFinite(s.pointsEarned || 0)
+          ? s.pointsEarned || 0
+          : 0,
+        loyaltyUrl: s.loyaltyUrl ?? null,
+      };
+
+      const payload = cleanForFirestore(basePayload);
+
+      const ref = await addDoc(collection(db, "sales"), {
+        ...payload,
+        createdAt: serverTimestamp(),
+      });
       s.id = ref.id;
 
       if (useLoyalty) {
-        if (!customerKnown) await createCustomer(customerPhone.trim(), customerName.trim());
+        if (!customerKnown)
+          await createCustomer(customerPhone.trim(), customerName.trim());
         await addLoyalty(customerPhone.trim(), pointsEarned, true);
       }
 
@@ -412,7 +547,9 @@ export default function App() {
       alert("Transaksi tersimpan ✅");
     } catch (e: any) {
       console.error(e);
-      alert("Transaksi tercetak, namun penyimpanan gagal: " + (e?.message || e));
+      alert(
+        "Transaksi tercetak, namun penyimpanan gagal: " + (e?.message || e)
+      );
     }
   };
 
@@ -424,10 +561,34 @@ export default function App() {
         <h2 style={{ marginTop: 8 }}>{SHOP_NAME} — POS</h2>
         <div style={card}>
           <h3>Login</h3>
-          <input placeholder="Email" style={input} value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input placeholder="Password" type="password" style={input} value={pass} onChange={(e) => setPass(e.target.value)} />
-          <button style={btnPrimary} onClick={async () => { try { await signInWithEmailAndPassword(auth, email, pass); } catch (e: any) { alert(e.message); } }}>Masuk</button>
-          <p style={{ fontSize: 12, opacity: 0.6, marginTop: 8 }}>Owner/admin: hanya email terdaftar yang bisa ubah produk & inventori.</p>
+          <input
+            placeholder="Email"
+            style={input}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            placeholder="Password"
+            type="password"
+            style={input}
+            value={pass}
+            onChange={(e) => setPass(e.target.value)}
+          />
+          <button
+            style={btnPrimary}
+            onClick={async () => {
+              try {
+                await signInWithEmailAndPassword(auth, email, pass);
+              } catch (e: any) {
+                alert(e.message);
+              }
+            }}
+          >
+            Masuk
+          </button>
+          <p style={{ fontSize: 12, opacity: 0.6, marginTop: 8 }}>
+            Owner/admin: hanya email terdaftar yang bisa ubah produk & inventori.
+          </p>
         </div>
       </div>
     );
@@ -436,58 +597,109 @@ export default function App() {
   return (
     <div style={wrap}>
       <InlineStyle />
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+        }}
+      >
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <img src="/logo.png" alt="logo" style={{ width: 36, height: 36, objectFit: "contain", borderRadius: 8 }} onError={(e: any) => (e.currentTarget.style.display = "none")} />
-          <div>
+          <img
+            src="/logo.png"
+            alt="logo"
+            style={{ width: 36, height: 36, objectFit: "contain", borderRadius: 8 }}
+            onError={(e: any) => (e.currentTarget.style.display = "none")}
+          />
+        <div>
             <h2 style={{ margin: "4px 0" }}>{SHOP_NAME} — Kasir</h2>
             <small>{OUTLET}</small>
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          <small>Masuk: {user.email} {isAdmin ? "(owner)" : "(staff)"} </small>
+          <small>
+            Masuk: {user.email} {isAdmin ? "(owner)" : "(staff)"}
+          </small>
           <button onClick={() => setTab("pos")}>Kasir</button>
-          <button onClick={() => { setTab("history"); loadSales(); }}>Riwayat</button>
+          <button
+            onClick={() => {
+              setTab("history");
+              loadSales();
+            }}
+          >
+            Riwayat
+          </button>
           <button onClick={() => setTab("products")}>Produk</button>
           <button onClick={() => setTab("inventory")}>Inventori</button>
           <button onClick={() => setTab("settings")}>Pengaturan</button>
-          <button style={btnDanger} onClick={() => signOut(auth)}>Keluar</button>
+          <button style={btnDanger} onClick={() => signOut(auth)}>
+            Keluar
+          </button>
         </div>
       </div>
 
       {tab === "pos" && (
         <div className="grid-pos">
+          {/* menu */}
           <div style={card}>
             <h3>Menu</h3>
             <div className="grid-menu">
-              {products.filter((p) => p.active !== false).map((p) => (
-                <button key={p.id} style={tile} onClick={() => addToCart(p)}>
-                  <div style={{ fontWeight: 600 }}>{p.name}</div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>{p.category}</div>
-                  <div style={{ marginTop: 4 }}>{IDR(p.price)}</div>
-                </button>
-              ))}
+              {products
+                .filter((p) => p.active !== false)
+                .map((p) => (
+                  <button key={p.id} style={tile} onClick={() => addToCart(p)}>
+                    <div style={{ fontWeight: 600 }}>{p.name}</div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>{p.category}</div>
+                    <div style={{ marginTop: 4 }}>{IDR(p.price)}</div>
+                  </button>
+                ))}
             </div>
           </div>
 
+          {/* cart */}
           <div style={card}>
             <h3>Keranjang</h3>
             {cart.length === 0 ? (
               <p style={{ opacity: 0.7 }}>Belum ada item.</p>
             ) : (
-              <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+              <ul
+                style={{
+                  listStyle: "none",
+                  padding: 0,
+                  margin: 0,
+                  display: "grid",
+                  gap: 8,
+                }}
+              >
                 {cart.map((ci, idx) => (
-                  <li key={idx} style={{ border: "1px solid #eee", borderRadius: 10, padding: 8, display: "grid", gridTemplateColumns: "1fr auto auto", gap: 10, alignItems: "center" }}>
+                  <li
+                    key={idx}
+                    style={{
+                      border: "1px solid #eee",
+                      borderRadius: 10,
+                      padding: 8,
+                      display: "grid",
+                      gridTemplateColumns: "1fr auto auto",
+                      gap: 10,
+                      alignItems: "center",
+                    }}
+                  >
                     <div>
                       <div style={{ fontWeight: 600 }}>{ci.name}</div>
-                      {ci.note && <div style={{ fontSize: 12, opacity: 0.7 }}>{ci.note}</div>}
+                      {ci.note && (
+                        <div style={{ fontSize: 12, opacity: 0.7 }}>{ci.note}</div>
+                      )}
                     </div>
                     <div>{IDR(ci.price)}</div>
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                       <button onClick={() => dec(idx)}>-</button>
                       <b>{ci.qty}</b>
                       <button onClick={() => inc(idx)}>+</button>
-                      <button onClick={() => rm(idx)} style={{ marginLeft: 6 }}>×</button>
+                      <button onClick={() => rm(idx)} style={{ marginLeft: 6 }}>
+                        ×
+                      </button>
                     </div>
                   </li>
                 ))}
@@ -495,24 +707,74 @@ export default function App() {
             )}
 
             <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
-              <input placeholder="Catatan (opsional)" style={input} value={note} onChange={(e) => setNote(e.target.value)} />
+              <input
+                placeholder="Catatan (opsional)"
+                style={input}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+              />
 
-              <div style={row}><span>Subtotal</span><b>{IDR(subtotal)}</b></div>
-              <div style={row}><span>Pajak %</span><input type="number" style={inputSm} value={taxRate} onChange={(e) => setTaxRate(Number(e.target.value) || 0)} /></div>
-              <div style={row}><span>Service %</span><input type="number" style={inputSm} value={serviceRate} onChange={(e) => setServiceRate(Number(e.target.value) || 0)} /></div>
-              <div style={row}><span>Diskon (Rp)</span><input type="number" style={inputSm} value={discount} onChange={(e) => setDiscount(Number(e.target.value) || 0)} /></div>
-              <div style={{ ...row, fontSize: 18 }}><span>Total</span><span>{IDR(total)}</span></div>
+              <div style={row}>
+                <span>Subtotal</span>
+                <b>{IDR(subtotal)}</b>
+              </div>
+              <div style={row}>
+                <span>Pajak %</span>
+                <input
+                  type="number"
+                  style={inputSm}
+                  value={taxRate}
+                  onChange={(e) => setTaxRate(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div style={row}>
+                <span>Service %</span>
+                <input
+                  type="number"
+                  style={inputSm}
+                  value={serviceRate}
+                  onChange={(e) => setServiceRate(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div style={row}>
+                <span>Diskon (Rp)</span>
+                <input
+                  type="number"
+                  style={inputSm}
+                  value={discount}
+                  onChange={(e) => setDiscount(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div style={{ ...row, fontSize: 18 }}>
+                <span>Total</span>
+                <span>{IDR(total)}</span>
+              </div>
 
               <div className="pay-grid">
-                <select value={method} onChange={(e) => setMethod(e.target.value as any)} style={input}>
+                <select
+                  value={method}
+                  onChange={(e) => setMethod(e.target.value as any)}
+                  style={input}
+                >
                   <option value="cash">Cash</option>
                   <option value="ewallet">E-Wallet</option>
                 </select>
                 {method === "cash" ? (
-                  <input type="number" placeholder="Tunai (Rp)" style={input} value={cash} onChange={(e) => setCash(Number(e.target.value) || 0)} />
+                  <input
+                    type="number"
+                    placeholder="Tunai (Rp)"
+                    style={input}
+                    value={cash}
+                    onChange={(e) => setCash(Number(e.target.value) || 0)}
+                  />
                 ) : (
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <img src="/qris.png" alt="QRIS" style={{ height: 40, objectFit: "contain" }} onError={(e: any) => (e.currentTarget.style.display = "none")} />
+                    <img
+                      src="/qris.png"
+                      alt="QRIS"
+                      style={{ height: 40, objectFit: "contain" }}
+                      onError={(e: any) => (e.currentTarget.style.display = "none")}
+                    />
                     <small>Scan QRIS untuk bayar.</small>
                   </div>
                 )}
@@ -521,16 +783,34 @@ export default function App() {
               {/* Loyalty */}
               <div style={{ borderTop: "1px dashed #ddd", paddingTop: 8 }}>
                 <div className="loyalty-grid">
-                  <input placeholder="No HP (opsional)" style={input} value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
+                  <input
+                    placeholder="No HP (opsional)"
+                    style={input}
+                    value={customerPhone}
+                    onChange={(e) => setCustomerPhone(e.target.value)}
+                  />
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <input
-                      placeholder={customerKnown ? "Nama otomatis" : "Nama (wajib jika baru)"}
-                      style={{ ...input, flex: 1, background: customerKnown ? "#f3f4f6" : "#fff" }}
+                      placeholder={
+                        customerKnown ? "Nama otomatis" : "Nama (wajib jika baru)"
+                      }
+                      style={{
+                        ...input,
+                        flex: 1,
+                        background: customerKnown ? "#f3f4f6" : "#fff",
+                      }}
                       value={customerName}
                       disabled={customerKnown}
                       onChange={(e) => setCustomerName(e.target.value)}
                     />
-                    <span style={{ border: "1px solid #e5e7eb", borderRadius: 999, padding: "6px 10px", fontSize: 12 }}>
+                    <span
+                      style={{
+                        border: "1px solid #e5e7eb",
+                        borderRadius: 999,
+                        padding: "6px 10px",
+                        fontSize: 12,
+                      }}
+                    >
                       {lookingUp ? "cek..." : `Poin: ${customerPoints}`}
                     </span>
                   </div>
@@ -539,7 +819,11 @@ export default function App() {
 
               <div className="actions">
                 <button onClick={clearCartAll}>Bersihkan</button>
-                <button style={btnPrimary} disabled={cart.length === 0 || (method === "cash" && cash < total)} onClick={finalize}>
+                <button
+                  style={btnPrimary}
+                  disabled={cart.length === 0 || (method === "cash" && cash < total)}
+                  onClick={finalize}
+                >
                   Selesaikan & Cetak
                 </button>
               </div>
@@ -550,7 +834,9 @@ export default function App() {
 
       {tab === "history" && (
         <div style={{ ...card, marginTop: 12 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+          >
             <h3>Riwayat Transaksi</h3>
             <button onClick={loadSales}>{loading ? "Memuat..." : "Muat Ulang"}</button>
           </div>
@@ -570,9 +856,13 @@ export default function App() {
                 <tbody>
                   {sales.map((s) => (
                     <tr key={s.id}>
-                      <td style={td}>{new Date(s.time).toLocaleString("id-ID", { hour12: false })}</td>
+                      <td style={td}>
+                        {new Date(s.time).toLocaleString("id-ID", { hour12: false })}
+                      </td>
                       <td style={td}>{s.id}</td>
-                      <td style={td}>{s.items.map((i) => `${i.name} x${i.qty}`).join(", ")}</td>
+                      <td style={td}>
+                        {s.items.map((i) => `${i.name} x${i.qty}`).join(", ")}
+                      </td>
                       <td style={tdRight}>{IDR(s.total)}</td>
                     </tr>
                   ))}
@@ -605,11 +895,17 @@ export default function App() {
       {tab === "settings" && (
         <div style={{ ...card, marginTop: 12 }}>
           <h3>Pengaturan</h3>
-          <p>• Nama toko: <b>{SHOP_NAME}</b></p>
-          <p>• Outlet: <b>{OUTLET}</b></p>
+          <p>
+            • Nama toko: <b>{SHOP_NAME}</b>
+          </p>
+          <p>
+            • Outlet: <b>{OUTLET}</b>
+          </p>
           <p>• Owner/Admin:</p>
           <ul>{ADMIN_EMAILS.map((m) => <li key={m}>{m}</li>)}</ul>
-          <p style={{ fontSize: 12, opacity: 0.7 }}>Logo: <code>public/logo.png</code>, QRIS: <code>public/qris.png</code>.</p>
+          <p style={{ fontSize: 12, opacity: 0.7 }}>
+            Logo: <code>public/logo.png</code>, QRIS: <code>public/qris.png</code>.
+          </p>
         </div>
       )}
     </div>
@@ -618,7 +914,11 @@ export default function App() {
 
 /* ============== Products Card ============== */
 function ProductsCard({
-  isAdmin, products, ingredients, onSave, onDelete,
+  isAdmin,
+  products,
+  ingredients,
+  onSave,
+  onDelete,
 }: {
   isAdmin: boolean;
   products: Product[];
@@ -626,13 +926,22 @@ function ProductsCard({
   onSave: (p: Product) => void | Promise<void>;
   onDelete: (id: string) => void | Promise<void>;
 }) {
-  const empty: Product = { name: "", price: 0, category: "Signature", active: true, recipe: [] };
+  const empty: Product = {
+    name: "",
+    price: 0,
+    category: "Signature",
+    active: true,
+    recipe: [],
+  };
   const [form, setForm] = useState<Product>(empty);
 
   function addRecipeRow() {
-    setForm((f) => ({ ...f, recipe: [...(f.recipe || []), { ingredientId: ingredients[0]?.id || "", qty: 1 }] }));
+    setForm((f) => ({
+      ...f,
+      recipe: [...(f.recipe || []), { ingredientId: ingredients[0]?.id || "", qty: 1 }],
+    }));
   }
-  function updateRecipe(idx: number, patch: Partial<{ ingredientId: string; qty: number }>) {
+  function updateRecipe(idx: number, patch: Partial<RecipeItem>) {
     setForm((f) => {
       const r = [...(f.recipe || [])];
       r[idx] = { ...r[idx], ...patch } as any;
@@ -655,11 +964,32 @@ function ProductsCard({
       </div>
 
       <div className="prod-grid">
-        <input style={input} placeholder="Nama" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input style={input} placeholder="Kategori" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
-        <input style={input} type="number" placeholder="Harga" value={form.price} onChange={(e) => setForm({ ...form, price: Number(e.target.value) || 0 })} />
+        <input
+          style={input}
+          placeholder="Nama"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+        />
+        <input
+          style={input}
+          placeholder="Kategori"
+          value={form.category}
+          onChange={(e) => setForm({ ...form, category: e.target.value })}
+        />
+        <input
+          style={input}
+          type="number"
+          placeholder="Harga"
+          value={form.price}
+          onChange={(e) => setForm({ ...form, price: Number(e.target.value) || 0 })}
+        />
         <label style={{ fontSize: 12 }}>
-          <input type="checkbox" checked={form.active !== false} onChange={(e) => setForm({ ...form, active: e.target.checked })} /> Aktif
+          <input
+            type="checkbox"
+            checked={form.active !== false}
+            onChange={(e) => setForm({ ...form, active: e.target.checked })}
+          />{" "}
+          Aktif
         </label>
       </div>
 
@@ -674,14 +1004,25 @@ function ProductsCard({
           <div className="recipe-grid">
             {form.recipe!.map((r, idx) => (
               <React.Fragment key={idx}>
-                <select style={input} value={r.ingredientId} onChange={(e) => updateRecipe(idx, { ingredientId: e.target.value })}>
+                <select
+                  style={input}
+                  value={r.ingredientId}
+                  onChange={(e) => updateRecipe(idx, { ingredientId: e.target.value })}
+                >
                   {ingredients.map((ing) => (
                     <option key={ing.id} value={ing.id}>
                       {ing.name} ({ing.unit})
                     </option>
                   ))}
                 </select>
-                <input style={input} type="number" min={0} step="0.01" value={r.qty} onChange={(e) => updateRecipe(idx, { qty: Number(e.target.value) || 0 })} />
+                <input
+                  style={input}
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={r.qty}
+                  onChange={(e) => updateRecipe(idx, { qty: Number(e.target.value) || 0 })}
+                />
                 <button onClick={() => rmRecipe(idx)}>Hapus</button>
               </React.Fragment>
             ))}
@@ -736,7 +1077,10 @@ function ProductsCard({
 
 /* ============== Inventory Card ============== */
 function InventoryCard({
-  isAdmin, ingredients, onSave, onDelete,
+  isAdmin,
+  ingredients,
+  onSave,
+  onDelete,
 }: {
   isAdmin: boolean;
   ingredients: Ingredient[];
@@ -754,11 +1098,35 @@ function InventoryCard({
       </div>
 
       <div className="inv-grid">
-        <input style={input} placeholder="Nama bahan" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input style={input} placeholder="Unit (gr/ml/pcs)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
-        <input style={input} type="number" placeholder="Stok" value={form.stock} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) || 0 })} />
-        <input style={input} type="number" placeholder="Ambang (low)" value={form.low || 0} onChange={(e) => setForm({ ...form, low: Number(e.target.value) || 0 })} />
-        <button style={btnPrimary} disabled={!isAdmin} onClick={() => onSave(form)}>{form.id ? "Simpan" : "Tambah"}</button>
+        <input
+          style={input}
+          placeholder="Nama bahan"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+        />
+        <input
+          style={input}
+          placeholder="Unit (gr/ml/pcs)"
+          value={form.unit}
+          onChange={(e) => setForm({ ...form, unit: e.target.value })}
+        />
+        <input
+          style={input}
+          type="number"
+          placeholder="Stok"
+          value={form.stock}
+          onChange={(e) => setForm({ ...form, stock: Number(e.target.value) || 0 })}
+        />
+        <input
+          style={input}
+          type="number"
+          placeholder="Ambang (low)"
+          value={form.low || 0}
+          onChange={(e) => setForm({ ...form, low: Number(e.target.value) || 0 })}
+        />
+        <button style={btnPrimary} disabled={!isAdmin} onClick={() => onSave(form)}>
+          {form.id ? "Simpan" : "Tambah"}
+        </button>
       </div>
 
       <div style={{ overflowX: "auto" }}>
@@ -774,7 +1142,10 @@ function InventoryCard({
           </thead>
           <tbody>
             {ingredients.map((i) => (
-              <tr key={i.id} style={{ background: i.stock <= (i.low || 0) ? "#fff7ed" : undefined }}>
+              <tr
+                key={i.id}
+                style={{ background: i.stock <= (i.low || 0) ? "#fff7ed" : undefined }}
+              >
                 <td style={td}>{i.name}</td>
                 <td style={td}>{i.unit}</td>
                 <td style={tdRight}>{i.stock}</td>
