@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CHAFU MATCHA – Loyalty</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; margin:0; background:#f6f7f8;}
+    .wrap{max-width:560px;margin:0 auto;padding:20px}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px}
+    .muted{color:#6b7280;font-size:12px}
+    .pill{display:inline-block;border:1px solid #e5e7eb;border-radius:999px;padding:4px 10px;margin-right:6px;font-size:12px}
+    img.logo{width:64px;height:64px;object-fit:contain;border-radius:10px}
+    .big{font-size:28px;font-weight:700;margin:8px 0}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div style="text-align:center;margin-bottom:12px">
+      <img src="/logo.png" class="logo" alt="logo" onerror="this.style.display='none'"/>
+      <div class="big">CHAFU MATCHA Loyalty</div>
+      <div class="muted">Mamamatcha @ MTHaryono</div>
+    </div>
+
+    <div class="card">
+      <div id="status">Memuat…</div>
+      <div id="content" style="display:none">
+        <p>Halo, <b id="custName">Pelanggan</b>!</p>
+        <p>Poin Anda saat ini: <b id="points">0</b></p>
+        <div class="muted">ID: <code id="uid"></code></div>
+        <hr/>
+        <p class="muted">Tunjukkan halaman ini ke kasir untuk klaim/cek poin. Penyelarasan otomatis dilakukan saat transaksi berikutnya.</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    // Ambil ?uid= (pakai nomor HP pelanggan)
+    const params = new URLSearchParams(location.search);
+    const uid = params.get("uid") || "";
+    document.getElementById("uid").textContent = uid || "(kosong)";
+
+    // Jika belum bisa konek Firestore dari halaman statis, tampilkan placeholder dulu:
+    // Halaman ini tetap valid (tidak 404) dan bisa dipakai langsung sekarang.
+    // Nanti saat kamu pegang laptop, kita sambungkan ke Firestore untuk menampilkan nama & poin realtime.
+
+    document.getElementById("status").style.display = "none";
+    document.getElementById("content").style.display = "block";
+  </script>
+</body>
+</html>
