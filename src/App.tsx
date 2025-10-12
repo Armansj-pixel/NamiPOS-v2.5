@@ -8,19 +8,19 @@ import {
   query, where, orderBy, serverTimestamp, increment
 } from "firebase/firestore";
 
-// ====== Konstanta & Types ======
+/** ====== KONFIG ====== */
 const SHOP_NAME = "CHAFU MATCHA";
 const OUTLET = "@MTHaryono";
 const ADMIN_EMAILS = ["antonius.arman123@gmail.com","ayuismaalabibbah@gmail.com"];
 
+/** ====== TYPES ====== */
 type Product = {
   id?: string;
   name: string;
   price: number;
   category: string;
   active?: boolean;
-  // Recipe inventori (opsional)
-  recipe?: { ingredientId: string; qty: number }[];
+  recipe?: { ingredientId: string; qty: number }[]; // per 1 cup
 };
 type Ingredient = { id?: string; name: string; unit: string; stock: number; low?: number };
 type CartItem = { productId: string; name: string; price: number; qty: number; note?: string };
@@ -46,7 +46,7 @@ type Sale = {
   loyaltyUrl?: string|null;
 };
 
-// ====== Loyalty helper ======
+/** ====== LOYALTY HELPERS ====== */
 const ORIGIN = typeof window!=="undefined" ? window.location.origin : "";
 const loyaltyUrlFor = (phone:string) => `${ORIGIN}/loyalty/?uid=${encodeURIComponent(phone.replace(/\D/g,""))}`;
 
@@ -74,19 +74,19 @@ async function addLoyalty(phone:string, addPoints:number, plusVisit=true){
   });
 }
 
-// ====== Komponen utama ======
+/** ====== APP ====== */
 export default function App(){
-  // Auth
+  /** Auth */
   const [user, setUser] = useState<User|null>(null);
   const [email, setEmail] = useState(""); const [pass, setPass] = useState("");
   useEffect(()=> onAuthStateChanged(auth, setUser), []);
   const isAdmin = useMemo(()=> !!user?.email && ADMIN_EMAILS.includes(String(user.email).toLowerCase()), [user]);
 
-  // Data master
+  /** Master data */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
-  // POS state
+  /** Tabs & POS state */
   const [tab, setTab] = useState<"pos"|"history"|"products"|"inventory"|"settings">("pos");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [discount, setDiscount] = useState(0);
@@ -96,46 +96,43 @@ export default function App(){
   const [cash, setCash] = useState(0);
   const [note, setNote] = useState("");
 
-  // Loyalty state (HP -> nama/poin auto)
+  /** Loyalty form */
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPoints, setCustomerPoints] = useState(0);
   const [customerKnown, setCustomerKnown] = useState(false);
   const [lookingUp, setLookingUp] = useState(false);
 
-  // History
+  /** History */
   const [sales, setSales] = useState<Sale[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // Derived
+  /** Derived totals */
   const subtotal = cart.reduce((s,i)=>s+i.price*i.qty,0);
   const taxValue = Math.round(subtotal*(taxRate/100));
   const serviceValue = Math.round(subtotal*(serviceRate/100));
   const total = Math.max(0, subtotal + taxValue + serviceValue - (discount||0));
   const change = Math.max(0, (cash||0) - total);
 
-  // ====== Load master ======
+  /** Load master */
   async function loadProducts(){
     const snap = await getDocs(query(collection(db,"products"), orderBy("name","asc")));
-    const rows = snap.docs.map(d=>({ id:d.id, ...(d.data() as any) })) as Product[];
-    setProducts(rows);
+    setProducts(snap.docs.map(d=>({ id:d.id, ...(d.data() as any) })) as Product[]);
   }
   async function loadIngredients(){
     const snap = await getDocs(query(collection(db,"ingredients"), orderBy("name","asc")));
-    const rows = snap.docs.map(d=>({ id:d.id, ...(d.data() as any) })) as Ingredient[];
-    setIngredients(rows);
+    setIngredients(snap.docs.map(d=>({ id:d.id, ...(d.data() as any) })) as Ingredient[]);
   }
   async function loadSales(){
     setLoading(true);
     try{
       const snap = await getDocs(query(collection(db,"sales"), where("outlet","==", OUTLET), orderBy("time","desc")));
-      const rows = snap.docs.map(d=>({ id:d.id, ...(d.data() as any)})) as Sale[];
-      setSales(rows);
+      setSales(snap.docs.map(d=>({ id:d.id, ...(d.data() as any)})) as Sale[]);
     } finally { setLoading(false); }
   }
   useEffect(()=>{ loadProducts(); loadIngredients(); },[]);
 
-  // ====== Loyalty lookup (debounce) ======
+  /** Loyalty lookup (debounce) */
   useEffect(()=>{
     const t = setTimeout(async ()=>{
       const phone = customerPhone.trim();
@@ -150,15 +147,12 @@ export default function App(){
     return ()=>clearTimeout(t);
   }, [customerPhone]);
 
-  // ====== Product CRUD (ringkas) ======
+  /** Product CRUD (ringkas) */
   async function saveProduct(p: Product){
     if(!isAdmin) return alert("Khusus owner/admin.");
     if(!p.name || p.price<=0) return alert("Nama & harga wajib.");
-    if(p.id){
-      await updateDoc(doc(db,"products",p.id), p as any);
-    } else {
-      await addDoc(collection(db,"products"), p as any);
-    }
+    if(p.id){ await setDoc(doc(db,"products",p.id), p as any, { merge:true }); }
+    else { await addDoc(collection(db,"products"), { ...p, active:p.active!==false, createdAt: serverTimestamp() }); }
     await loadProducts();
   }
   async function deleteProductById(id:string){
@@ -168,12 +162,13 @@ export default function App(){
     await loadProducts();
   }
 
-  // ====== Ingredient CRUD (ringkas) ======
-  async function saveIngredient(ing: Ingredient){
+  /** Ingredient CRUD (ringkas) */
+  async function saveIngredient(i: Ingredient){
     if(!isAdmin) return alert("Khusus owner/admin.");
-    if(!ing.name) return alert("Nama bahan wajib.");
-    if(ing.id){ await updateDoc(doc(db,"ingredients",ing.id), ing as any); }
-    else { await addDoc(collection(db,"ingredients"), ing as any); }
+    if(!i.name) return alert("Nama bahan wajib.");
+    const payload = { name:i.name, unit:i.unit, stock:Number(i.stock||0), low:Number(i.low||0), updatedAt: serverTimestamp() };
+    if(i.id){ await setDoc(doc(db,"ingredients",i.id), payload, { merge:true }); }
+    else { await addDoc(collection(db,"ingredients"), { ...payload, createdAt: serverTimestamp() }); }
     await loadIngredients();
   }
   async function deleteIngredientById(id:string){
@@ -183,7 +178,7 @@ export default function App(){
     await loadIngredients();
   }
 
-  // ====== POS Helpers ======
+  /** POS helpers */
   function addToCart(p:Product){
     setCart(prev=>{
       const f = prev.find(x=>x.productId===p.id && (x.note||"")==(note||""));
@@ -199,29 +194,29 @@ export default function App(){
     setCustomerPhone(""); setCustomerName(""); setCustomerPoints(0); setCustomerKnown(false);
   }
 
-  // ====== Inventory deduction (berdasar recipe) ======
+  /** Inventory deduction by recipe */
   async function deductInventoryForCart(cartItems: CartItem[]){
-    // Kumpulkan total kebutuhan per ingredientId
+    // kumpulkan kebutuhan
     const need: Record<string, number> = {};
     for(const ci of cartItems){
       const p = products.find(pp=>pp.id===ci.productId);
       if(!p?.recipe) continue;
       for(const r of p.recipe){
+        if(!r.ingredientId) continue;
         need[r.ingredientId] = (need[r.ingredientId]||0) + (r.qty * ci.qty);
       }
     }
-    // Update stok ingredient
-    const updates = Object.entries(need);
-    for(const [ingId, qty] of updates){
+    // update stok
+    for(const [ingId, qty] of Object.entries(need)){
       const ref = doc(db,"ingredients",ingId);
       const snap = await getDoc(ref);
       if(!snap.exists()) continue;
       const cur = (snap.data() as any).stock || 0;
-      await updateDoc(ref, { stock: Math.max(0, cur - qty) });
+      await updateDoc(ref, { stock: Math.max(0, cur - qty), updatedAt: serverTimestamp() });
     }
   }
 
-  // ====== Printer 80mm dengan logo + QR loyalty ======
+  /** Printer 80mm — logo + QR loyalty */
   function printReceipt80mm(s: Sale){
     const w = window.open("","_blank","width=420,height=700");
     if(!w) return;
@@ -281,8 +276,8 @@ export default function App(){
     w.document.write(html); w.document.close();
   }
 
-  // ====== Finalize Sale ======
-  async function finalize(){
+  /** FINALIZE — cetak DULU, baru async (hindari popup blocked) */
+  const finalize = async () => {
     if(cart.length===0) return alert("Keranjang kosong.");
     if(method==="cash" && cash < total) return alert("Uang tunai kurang.");
 
@@ -290,21 +285,15 @@ export default function App(){
     if(useLoyalty && !customerKnown && !customerName.trim()){
       return alert("Nama pelanggan wajib diisi untuk nomor baru.");
     }
-
-    // hitung poin
     const pointsEarned = useLoyalty ? cart.reduce((s,i)=>s+i.qty,0) : 0;
 
-    // siapkan record transaksi
+    // 1) Susun record (ID belum ada → boleh cetak tanpa ID)
     const s: Sale = {
       time: new Date().toISOString(),
       cashier: user?.email || "-",
       items: cart,
-      subtotal, discount, taxRate, serviceRate,
-      taxValue, serviceValue,
-      total,
-      method,
-      cash: method==="cash" ? cash : 0,
-      change: method==="cash" ? change : 0,
+      subtotal, discount, taxRate, serviceRate, taxValue, serviceValue, total,
+      method, cash: method==="cash" ? cash : 0, change: method==="cash" ? change : 0,
       outlet: OUTLET,
       customerPhone: useLoyalty ? customerPhone.trim() : null,
       customerName:  useLoyalty ? (customerKnown ? customerName : customerName.trim()) : null,
@@ -312,37 +301,41 @@ export default function App(){
       loyaltyUrl: useLoyalty ? loyaltyUrlFor(customerPhone) : null,
     };
 
-    // simpan ke Firestore
-    const ref = await addDoc(collection(db,"sales"), {
-      ...s,
-      createdAt: serverTimestamp()
-    });
-    s.id = ref.id;
-
-    // update loyalty
-    if(useLoyalty){
-      if(!customerKnown) await createCustomer(customerPhone.trim(), customerName.trim());
-      await addLoyalty(customerPhone.trim(), pointsEarned, true);
-    }
-
-    // deduct stok
-    await deductInventoryForCart(cart);
-
-    // print
+    // 2) CETAK struk dulu → agar dianggap direct user gesture (tidak diblok popup)
     printReceipt80mm(s);
 
-    // refresh history ringan
-    setSales(prev=>[s, ...prev]);
+    // 3) Lanjut proses async (simpan, loyalty, stok) tanpa mengganggu popup
+    try{
+      // simpan transaksi
+      const ref = await addDoc(collection(db,"sales"), { ...s, createdAt: serverTimestamp() });
+      s.id = ref.id;
 
-    // reset
-    clearCartAll();
-    alert("Transaksi tersimpan ✅");
-  }
+      // loyalty
+      if(useLoyalty){
+        if(!customerKnown) await createCustomer(customerPhone.trim(), customerName.trim());
+        await addLoyalty(customerPhone.trim(), pointsEarned, true);
+      }
 
-  // ====== UI sederhana ======
+      // stok
+      await deductInventoryForCart(cart);
+
+      // history ringan
+      setSales(prev=>[s, ...prev]);
+
+      // reset
+      clearCartAll();
+      alert("Transaksi tersimpan ✅");
+    }catch(e:any){
+      console.error(e);
+      alert("Transaksi tercetak, namun penyimpanan gagal: "+(e?.message||e));
+    }
+  };
+
+  /** ====== UI ====== */
   if(!user){
     return (
       <div style={wrap}>
+        <InlineStyle />
         <h2 style={{marginTop:8}}>{SHOP_NAME} — POS</h2>
         <div style={card}>
           <h3>Login</h3>
@@ -350,13 +343,14 @@ export default function App(){
           <input placeholder="Password" type="password" style={input} value={pass} onChange={e=>setPass(e.target.value)} />
           <button style={btnPrimary} onClick={async()=>{ try{ await signInWithEmailAndPassword(auth,email,pass); }catch(e:any){ alert(e.message); } }}>Masuk</button>
           <p style={{fontSize:12,opacity:.6,marginTop:8}}>Owner/admin: hanya email terdaftar yang bisa ubah produk & inventori.</p>
-        </div>
+      </div>
       </div>
     );
   }
 
   return (
     <div style={wrap}>
+      <InlineStyle />
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
@@ -367,7 +361,7 @@ export default function App(){
           </div>
         </div>
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
-          <small>Masuk sebagai: {user.email} {isAdmin?"(owner)":"(staff)"}</small>
+          <small>Masuk: {user.email} {isAdmin?"(owner)":"(staff)"} </small>
           <button onClick={()=>setTab("pos")}>Kasir</button>
           <button onClick={()=>{ setTab("history"); loadSales(); }}>Riwayat</button>
           <button onClick={()=>setTab("products")}>Produk</button>
@@ -377,13 +371,13 @@ export default function App(){
         </div>
       </div>
 
-      {/* Tabs */}
+      {/* LAYOUT: 1 kolom (mobile) / 2 kolom (desktop) */}
       {tab==="pos" && (
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12, marginTop:12}}>
+        <div className="grid-pos">
           {/* Menu */}
           <div style={card}>
             <h3>Menu</h3>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+            <div className="grid-menu">
               {products.filter(p=>p.active!==false).map(p=>(
                 <button key={p.id} style={tile} onClick={()=>addToCart(p)}>
                   <div style={{fontWeight:600}}>{p.name}</div>
@@ -432,7 +426,7 @@ export default function App(){
               </div>
               <div style={{...row, fontSize:18}}><span>Total</span><span>{IDR(total)}</span></div>
 
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              <div className="pay-grid">
                 <select value={method} onChange={e=>setMethod(e.target.value as any)} style={input}>
                   <option value="cash">Cash</option>
                   <option value="ewallet">E-Wallet</option>
@@ -449,7 +443,7 @@ export default function App(){
 
               {/* Loyalty */}
               <div style={{borderTop:"1px dashed #ddd", paddingTop:8}}>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <div className="loyalty-grid">
                   <input placeholder="No HP (opsional)" style={input} value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} />
                   <div style={{display:"flex",gap:8,alignItems:"center"}}>
                     <input
@@ -466,7 +460,7 @@ export default function App(){
                 </div>
               </div>
 
-              <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+              <div className="actions">
                 <button onClick={clearCartAll}>Bersihkan</button>
                 <button style={btnPrimary} disabled={cart.length===0 || (method==="cash" && cash<total)} onClick={finalize}>
                   Selesaikan & Cetak
@@ -535,17 +529,15 @@ export default function App(){
           <p>• Nama toko: <b>{SHOP_NAME}</b></p>
           <p>• Outlet: <b>{OUTLET}</b></p>
           <p>• Owner/Admin:</p>
-          <ul>
-            {ADMIN_EMAILS.map(m=><li key={m}>{m}</li>)}
-          </ul>
-          <p style={{fontSize:12,opacity:.7}}>Logo letakkan di <code>public/logo.png</code>. QRIS di <code>public/qris.png</code> (opsional).</p>
+          <ul>{ADMIN_EMAILS.map(m=><li key={m}>{m}</li>)}</ul>
+          <p style={{fontSize:12,opacity:.7}}>Logo: <code>public/logo.png</code>, QRIS: <code>public/qris.png</code>.</p>
         </div>
       )}
     </div>
   );
 }
 
-// ==== Sub-komponen Products (dengan recipe) ====
+/** ====== Sub Komponen: Products ====== */
 function ProductsCard({ isAdmin, products, ingredients, onSave, onDelete }:{
   isAdmin:boolean;
   products: Product[];
@@ -581,7 +573,7 @@ function ProductsCard({ isAdmin, products, ingredients, onSave, onDelete }:{
         <button onClick={()=>setForm(empty)}>Produk Baru</button>
       </div>
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr auto",gap:8,alignItems:"center",marginBottom:8}}>
+      <div className="prod-grid">
         <input style={input} placeholder="Nama" value={form.name} onChange={e=>setForm({...form, name:e.target.value})}/>
         <input style={input} placeholder="Kategori" value={form.category} onChange={e=>setForm({...form, category:e.target.value})}/>
         <input style={input} type="number" placeholder="Harga" value={form.price} onChange={e=>setForm({...form, price:Number(e.target.value)||0})}/>
@@ -594,7 +586,7 @@ function ProductsCard({ isAdmin, products, ingredients, onSave, onDelete }:{
           <button onClick={addRecipeRow}>+ Bahan</button>
         </div>
         {(form.recipe||[]).length===0 ? <p style={{opacity:.7}}>Belum ada bahan.</p> : (
-          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:8}}>
+          <div className="recipe-grid">
             {form.recipe!.map((r,idx)=>(
               <React.Fragment key={idx}>
                 <select style={input} value={r.ingredientId} onChange={e=>updateRecipe(idx,{ingredientId:e.target.value})}>
@@ -645,7 +637,7 @@ function ProductsCard({ isAdmin, products, ingredients, onSave, onDelete }:{
   );
 }
 
-// ==== Sub-komponen Inventory ====
+/** ====== Sub Komponen: Inventory ====== */
 function InventoryCard({ isAdmin, ingredients, onSave, onDelete }:{
   isAdmin:boolean;
   ingredients: Ingredient[];
@@ -662,7 +654,7 @@ function InventoryCard({ isAdmin, ingredients, onSave, onDelete }:{
         <button onClick={()=>setForm(empty)}>Bahan Baru</button>
       </div>
 
-      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr auto",gap:8,alignItems:"center",marginBottom:8}}>
+      <div className="inv-grid">
         <input style={input} placeholder="Nama bahan" value={form.name} onChange={e=>setForm({...form, name:e.target.value})}/>
         <input style={input} placeholder="Unit (gr/ml/pcs)" value={form.unit} onChange={e=>setForm({...form, unit:e.target.value})}/>
         <input style={input} type="number" placeholder="Stok" value={form.stock} onChange={e=>setForm({...form, stock:Number(e.target.value)||0})}/>
@@ -697,7 +689,44 @@ function InventoryCard({ isAdmin, ingredients, onSave, onDelete }:{
   );
 }
 
-// ==== Styles kecil ====
+/** ====== Styles + Responsive ====== */
+function InlineStyle(){
+  return (
+    <style>{`
+      .grid-pos {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      .grid-menu {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .pay-grid, .loyalty-grid, .prod-grid, .recipe-grid, .inv-grid {
+        display: grid;
+        gap: 8px;
+      }
+      .recipe-grid { grid-template-columns: 2fr 1fr auto; }
+      .prod-grid   { grid-template-columns: 1fr 1fr 1fr auto; align-items: center; }
+      .inv-grid    { grid-template-columns: 2fr 1fr 1fr 1fr auto; align-items: center; }
+      .actions { display:flex; gap:8px; justify-content:space-between; flex-wrap:wrap; }
+
+      @media (max-width: 768px) {
+        .grid-menu { grid-template-columns: 1fr; }
+        .recipe-grid { grid-template-columns: 1fr 1fr auto; }
+        .prod-grid   { grid-template-columns: 1fr 1fr; }
+        .inv-grid    { grid-template-columns: 1fr 1fr; }
+      }
+
+      @media (min-width: 769px) {
+        .grid-pos { grid-template-columns: 1fr 1fr; }
+      }
+    `}</style>
+  );
+}
+
+/** ====== Small style tokens ====== */
 const wrap: React.CSSProperties = { padding: 12, maxWidth: 1100, margin: "0 auto" };
 const card: React.CSSProperties = { border:"1px solid #e5e7eb", borderRadius:12, padding:12, background:"#fff" };
 const input: React.CSSProperties = { border:"1px solid #e5e7eb", borderRadius:8, padding:"10px 12px", width:"100%" };
