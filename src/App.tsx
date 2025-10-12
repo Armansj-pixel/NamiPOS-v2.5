@@ -1,113 +1,34 @@
-// src/App.tsx — CHAFU MATCHA POS (gabungan perbaikan #1 + #2)
-// - Riwayat: subscribe tanpa index gabungan (filter outlet di memori)
-// - Shift: bisa ditutup walau rekap gagal + rekap tanpa index gabungan
-// - Fitur utama tetap: POS, E-Wallet QR, Inventory, Resep, Loyalty, Laporan, Dashboard, Offline queue
-
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { auth, db, IDR, todayStr } from "./lib/firebase";
 import {
-  db,
-  fetchProducts, upsertProduct, removeProduct,
-  fetchIngredients, upsertIngredient, deleteIngredient,
-  fetchRecipes, setRecipeForProduct, deductStockForSale, adjustStock,
-  type Ingredient as InvIngredient, type RecipeDoc
-} from "./lib/firebase";
-
+  signInWithEmailAndPassword, onAuthStateChanged, signOut, User
+} from "firebase/auth";
 import {
-  addDoc, collection, serverTimestamp,
-  query, orderBy, onSnapshot, doc, getDoc, setDoc,
-  deleteDoc, updateDoc, where, getDocs
+  collection, doc, getDoc, getDocs, addDoc, setDoc, updateDoc, deleteDoc,
+  query, where, orderBy, serverTimestamp, increment
 } from "firebase/firestore";
 
-import {
-  getAuth, onAuthStateChanged,
-  signInWithEmailAndPassword, signOut, User
-} from "firebase/auth";
+// ====== Konstanta & Types ======
+const SHOP_NAME = "CHAFU MATCHA";
+const OUTLET = "@MTHaryono";
+const ADMIN_EMAILS = ["antonius.arman123@gmail.com","ayuismaalabibbah@gmail.com"];
 
-// ----------------------- Utils -----------------------
-const IDR = (n: number) =>
-  new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
-
-const ADMIN_EMAILS = [
-  "antonius.arman123@gmail.com",
-  "ayuismaalabibbah@gmail.com",
-];
-
-const PAY_METHODS = ["Tunai", "QRIS", "GoPay", "OVO", "DANA", "Transfer"] as const;
-type PayMethod = (typeof PAY_METHODS)[number];
-
-const walletQR: Record<string, string> = {
-  QRIS: "/qr-qris.png",
-  GoPay: "/qr-qris.png",
-  OVO: "/qr-qris.png",
-  DANA: "/qr-qris.png",
-  Transfer: "/qr-qris.png",
+type Product = {
+  id?: string;
+  name: string;
+  price: number;
+  category: string;
+  active?: boolean;
+  // Recipe inventori (opsional)
+  recipe?: { ingredientId: string; qty: number }[];
 };
-
-const SHEETS_WEBHOOK = (import.meta as any).env?.VITE_SHEETS_WEBHOOK || "";
-
-// Draw simple line chart to canvas (no external lib)
-function drawLineChart(canvas: HTMLCanvasElement, labels: string[], data: number[]) {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const dpr = (window.devicePixelRatio || 1);
-  const w = (canvas.width = canvas.clientWidth * dpr);
-  const h = (canvas.height = canvas.clientHeight * dpr);
-  ctx.scale(dpr, dpr);
-
-  ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
-
-  const pad = 20;
-  const innerW = canvas.clientWidth - pad * 2;
-  const innerH = canvas.clientHeight - pad * 2;
-
-  const max = Math.max(1, ...data);
-  const stepX = data.length > 1 ? innerW / (data.length - 1) : 0;
-
-  // grid
-  ctx.strokeStyle = "#eee";
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = pad + (innerH / 4) * i;
-    ctx.beginPath();
-    ctx.moveTo(pad, y);
-    ctx.lineTo(pad + innerW, y);
-    ctx.stroke();
-  }
-
-  // line
-  ctx.strokeStyle = "#2e7d32";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  data.forEach((v, idx) => {
-    const x = pad + stepX * idx;
-    const y = pad + innerH - (v / max) * innerH;
-    if (idx === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-
-  // dots
-  ctx.fillStyle = "#2e7d32";
-  data.forEach((v, idx) => {
-    const x = pad + stepX * idx;
-    const y = pad + innerH - (v / max) * innerH;
-    ctx.beginPath();
-    ctx.arc(x, y, 2.5, 0, Math.PI * 2);
-    ctx.fill();
-  });
-}
-
-// -------------- Types --------------
-type Product = { id: number; name: string; price: number; active?: boolean; category?: string };
-type CartItem = { id: string; productId: number; name: string; price: number; qty: number };
-
-type SaleRow = {
+type Ingredient = { id?: string; name: string; unit: string; stock: number; low?: number };
+type CartItem = { productId: string; name: string; price: number; qty: number; note?: string };
+type Sale = {
   id?: string;
   time: string;
-  timeMs: number;
   cashier: string;
-  outletId?: string;
-  items: { name: string; qty: number; price: number }[];
+  items: CartItem[];
   subtotal: number;
   discount: number;
   taxRate: number;
@@ -115,1131 +36,210 @@ type SaleRow = {
   taxValue: number;
   serviceValue: number;
   total: number;
-  payMethod: string;
+  method: "cash" | "ewallet";
   cash: number;
   change: number;
-  createdAt?: any;
-  customerPhone?: string | null;
-  earnedPoints?: number;
-  redeemedPoints?: number;
-  redeemValueRp?: number;
-  deviceDate?: number;
+  outlet: string;
+  customerPhone?: string|null;
+  customerName?: string|null;
+  pointsEarned?: number;
+  loyaltyUrl?: string|null;
 };
 
-type ShiftDoc = {
-  id?: string;
-  openedAt: number;
-  openedBy: string;
-  outletId?: string;
-  closedAt?: number | null;
-  closedBy?: string | null;
-  cashOpen?: number;
-  cashClose?: number;
-  totals?: Record<string, number>;
-  trxCount?: number;
-};
+// ====== Loyalty helper ======
+const ORIGIN = typeof window!=="undefined" ? window.location.origin : "";
+const loyaltyUrlFor = (phone:string) => `${ORIGIN}/loyalty/?uid=${encodeURIComponent(phone.replace(/\D/g,""))}`;
 
-type SettingsDoc = {
-  pointEarnPerRp: number;
-  pointValueRp: number;
-  maxRedeemPoints?: number;
-  pointExpiryDays?: number;
-  lowStockThreshold?: number;
-};
+async function fetchCustomerByPhone(phone:string){
+  const id = phone.replace(/\D/g,"");
+  const ref = doc(collection(db,"customers"), id);
+  const snap = await getDoc(ref);
+  return { id, ref, data: snap.exists() ? (snap.data() as any) : null };
+}
+async function createCustomer(phone:string, name:string){
+  const id = phone.replace(/\D/g,"");
+  const ref = doc(collection(db,"customers"), id);
+  await setDoc(ref, {
+    phone, name, points: 0, visits: 0,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp()
+  });
+  return { id, ref };
+}
+async function addLoyalty(phone:string, addPoints:number, plusVisit=true){
+  const { ref } = await fetchCustomerByPhone(phone);
+  await updateDoc(ref, {
+    points: increment(addPoints),
+    ...(plusVisit ? { visits: increment(1) } : {}),
+    updatedAt: serverTimestamp()
+  });
+}
 
-// -------------- Defaults --------------
-const DEFAULT_PRODUCTS: Product[] = [
-  { id: 1, name: "Matcha OG", price: 15000, active: true, category: "Signature" },
-  { id: 2, name: "Matcha Cloud", price: 18000, active: true, category: "Signature" },
-  { id: 3, name: "Strawberry Cream Matcha", price: 17000, active: true, category: "Signature" },
-  { id: 4, name: "Choco Matcha", price: 17000, active: true, category: "Signature" },
-  { id: 5, name: "Matcha Cookies", price: 17000, active: true, category: "Signature" },
-  { id: 6, name: "Honey Matcha", price: 18000, active: true, category: "Signature" },
-  { id: 7, name: "Coconut Matcha", price: 18000, active: true, category: "Signature" },
-  { id: 8, name: "Orange Matcha", price: 17000, active: true, category: "Signature" },
-];
-
-const DEFAULT_SETTINGS: SettingsDoc = {
-  pointEarnPerRp: 10000,
-  pointValueRp: 100,
-  maxRedeemPoints: 0,
-  pointExpiryDays: 0,
-  lowStockThreshold: 10,
-};
-
-// -------------- Offline Queue Keys --------------
-const K_PENDING_SALES = "pos.pendingSales.v1";
-const K_OUTLET = "pos.outlet.v1";
-
-// ===================================================================================
-// MAIN APP
-// ===================================================================================
-export default function App() {
-  const auth = getAuth();
-
+// ====== Komponen utama ======
+export default function App(){
   // Auth
-  const [user, setUser] = useState<User | null>(null);
-  const [email, setEmail] = useState("");
-  const [pass, setPass] = useState("");
+  const [user, setUser] = useState<User|null>(null);
+  const [email, setEmail] = useState(""); const [pass, setPass] = useState("");
+  useEffect(()=> onAuthStateChanged(auth, setUser), []);
+  const isAdmin = useMemo(()=> !!user?.email && ADMIN_EMAILS.includes(String(user.email).toLowerCase()), [user]);
 
-  // Tabs
-  const [tab, setTab] = useState<"pos" | "produk" | "inventori" | "resep" | "riwayat" | "laporan" | "dashboard" | "loyalty">("pos");
-
-  // Outlet
-  const [outletId, setOutletId] = useState<string>(() => localStorage.getItem(K_OUTLET) || "OUTLET-01");
-  useEffect(() => localStorage.setItem(K_OUTLET, outletId), [outletId]);
-
-  // Master data
+  // Data master
   const [products, setProducts] = useState<Product[]>([]);
-  const [ingredients, setIngredients] = useState<InvIngredient[]>([]);
-  const [recipes, setRecipes] = useState<RecipeDoc[]>([]);
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
-  // Settings
-  const [settingsDoc, setSettingsDoc] = useState<SettingsDoc>(DEFAULT_SETTINGS);
-
-  // POS
+  // POS state
+  const [tab, setTab] = useState<"pos"|"history"|"products"|"inventory"|"settings">("pos");
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [payMethod, setPayMethod] = useState<PayMethod>("Tunai");
-  const [cash, setCash] = useState<number>(0);
-  const subtotal = cart.reduce((a, b) => a + b.price * b.qty, 0);
+  const [discount, setDiscount] = useState(0);
+  const [taxRate, setTaxRate] = useState(0);
+  const [serviceRate, setServiceRate] = useState(0);
+  const [method, setMethod] = useState<"cash"|"ewallet">("cash");
+  const [cash, setCash] = useState(0);
+  const [note, setNote] = useState("");
 
-  // Riwayat
-  const [sales, setSales] = useState<SaleRow[]>([]);
-  // Filter outlet di memori → bisa dipakai global (untuk export juga)
-  const visibleSales = useMemo(
-    () => sales.filter(s => !outletId ? true : (s.outletId || "") === outletId),
-    [sales, outletId]
-  );
-
-  // Loyalty + katalog pelanggan
+  // Loyalty state (HP -> nama/poin auto)
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerName, setCustomerName] = useState("");
-  const [customerPoints, setCustomerPoints] = useState<number | null>(null);
-  const [customerSuggest, setCustomerSuggest] = useState<{ phone: string; name?: string; points?: number }[]>([]);
-  const [usePoints, setUsePoints] = useState<number>(0);
+  const [customerPoints, setCustomerPoints] = useState(0);
+  const [customerKnown, setCustomerKnown] = useState(false);
+  const [lookingUp, setLookingUp] = useState(false);
 
-  // Shift
-  const [activeShift, setActiveShift] = useState<ShiftDoc | null>(null);
+  // History
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  // Laporan
-  const [from, setFrom] = useState<string>("");
-  const [to, setTo] = useState<string>("");
-  const [report, setReport] = useState<{ omzet: number; trx: number; aov: number; top: { name: string; qty: number }[], trend: { d: string; amt: number }[] }>({
-    omzet: 0, trx: 0, aov: 0, top: [], trend: []
-  });
+  // Derived
+  const subtotal = cart.reduce((s,i)=>s+i.price*i.qty,0);
+  const taxValue = Math.round(subtotal*(taxRate/100));
+  const serviceValue = Math.round(subtotal*(serviceRate/100));
+  const total = Math.max(0, subtotal + taxValue + serviceValue - (discount||0));
+  const change = Math.max(0, (cash||0) - total);
 
-  // Online state
-  const [online, setOnline] = useState<boolean>(navigator.onLine);
-  useEffect(() => {
-    const on = () => setOnline(true);
-    const off = () => setOnline(false);
-    window.addEventListener("online", on);
-    window.addEventListener("offline", off);
-    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
-  }, []);
-
-  // ---------- Auth lifecycle ----------
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      if (u) {
-        await ensureUserProfile(u);
-        await loadSettings();
-        await loadData();
-        subscribeSales(); // realtime riwayat (tanpa index gabungan)
-        hydratePendingQueue(); // coba sync jika ada antrian
-      }
-    });
-    return () => unsub();
-  }, []);
-
-  // ---------- Subscribe Riwayat (gabungan perbaikan) ----------
-  function subscribeSales() {
-    const base = collection(db, "sales");
-    // Ambil semua sales by createdAt; outlet difilter saat render (hindari index gabungan)
-    const qSales = query(base, orderBy("createdAt", "desc"));
-
-    const unsub = onSnapshot(
-      qSales,
-      (snap) => {
-        const rows = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as SaleRow[];
-        setSales(rows);
-      },
-      (err) => {
-        console.error("onSnapshot(sales) error:", err);
-        alert("Gagal memuat Riwayat: " + err.message + "\n(Cek Firestore index/rules)");
-      }
-    );
-    return unsub;
+  // ====== Load master ======
+  async function loadProducts(){
+    const snap = await getDocs(query(collection(db,"products"), orderBy("name","asc")));
+    const rows = snap.docs.map(d=>({ id:d.id, ...(d.data() as any) })) as Product[];
+    setProducts(rows);
   }
-
-  // ---------- Derived ----------
-  function isAdminEmail(e: string) {
-    return ADMIN_EMAILS.includes((e || "").toLowerCase());
+  async function loadIngredients(){
+    const snap = await getDocs(query(collection(db,"ingredients"), orderBy("name","asc")));
+    const rows = snap.docs.map(d=>({ id:d.id, ...(d.data() as any) })) as Ingredient[];
+    setIngredients(rows);
   }
-  const isAdmin = !!(user && isAdminEmail(user.email || ""));
-
-  function calcEarnedPoints(total: number) {
-    const per = settingsDoc.pointEarnPerRp || 10000;
-    return Math.floor(total / per);
+  async function loadSales(){
+    setLoading(true);
+    try{
+      const snap = await getDocs(query(collection(db,"sales"), where("outlet","==", OUTLET), orderBy("time","desc")));
+      const rows = snap.docs.map(d=>({ id:d.id, ...(d.data() as any)})) as Sale[];
+      setSales(rows);
+    } finally { setLoading(false); }
   }
-  function pointsToRupiah(pts: number) {
-    const val = settingsDoc.pointValueRp || 100;
-    return pts * val;
-  }
+  useEffect(()=>{ loadProducts(); loadIngredients(); },[]);
 
-  const redeemCap = (settingsDoc.maxRedeemPoints && settingsDoc.maxRedeemPoints > 0)
-    ? Math.min(customerPoints || 0, settingsDoc.maxRedeemPoints)
-    : (customerPoints || 0);
+  // ====== Loyalty lookup (debounce) ======
+  useEffect(()=>{
+    const t = setTimeout(async ()=>{
+      const phone = customerPhone.trim();
+      if(!/\d{6,}/.test(phone)){ setCustomerKnown(false); setCustomerName(""); setCustomerPoints(0); return; }
+      setLookingUp(true);
+      try{
+        const { data } = await fetchCustomerByPhone(phone);
+        if(data){ setCustomerKnown(true); setCustomerName(data.name||""); setCustomerPoints(Number(data.points||0)); }
+        else { setCustomerKnown(false); setCustomerName(""); setCustomerPoints(0); }
+      } finally { setLookingUp(false); }
+    }, 400);
+    return ()=>clearTimeout(t);
+  }, [customerPhone]);
 
-  const redeemValueRp = pointsToRupiah(usePoints || 0);
-  const finalTotal = Math.max(0, subtotal - redeemValueRp);
-  const change = payMethod === "Tunai" ? Math.max(0, cash - finalTotal) : 0;
-
-  // ---------- Loaders ----------
-  async function loadData() {
-    let p = await fetchProducts();
-    if (!p || p.length === 0) {
-      await Promise.all(DEFAULT_PRODUCTS.map(upsertProduct));
-      p = await fetchProducts();
-    }
-    setProducts(p);
-    setIngredients(await fetchIngredients());
-    setRecipes(await fetchRecipes());
-  }
-
-  async function loadSettings() {
-    const sref = doc(db, "settings", "global");
-    const snap = await getDoc(sref);
-    if (snap.exists()) {
-      setSettingsDoc({ ...DEFAULT_SETTINGS, ...(snap.data() as SettingsDoc) });
+  // ====== Product CRUD (ringkas) ======
+  async function saveProduct(p: Product){
+    if(!isAdmin) return alert("Khusus owner/admin.");
+    if(!p.name || p.price<=0) return alert("Nama & harga wajib.");
+    if(p.id){
+      await updateDoc(doc(db,"products",p.id), p as any);
     } else {
-      await setDoc(sref, DEFAULT_SETTINGS);
-      setSettingsDoc(DEFAULT_SETTINGS);
+      await addDoc(collection(db,"products"), p as any);
     }
+    await loadProducts();
+  }
+  async function deleteProductById(id:string){
+    if(!isAdmin) return alert("Khusus owner/admin.");
+    if(!confirm("Hapus produk ini?")) return;
+    await deleteDoc(doc(db,"products",id));
+    await loadProducts();
   }
 
-  async function ensureUserProfile(u: User) {
-    const ref = doc(collection(db, "users"), u.uid);
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      const mail = (u.email || "").toLowerCase();
-      const role = isAdminEmail(mail) ? "owner" : "cashier";
-      await setDoc(ref, { email: mail, role, createdAt: Date.now(), outletId });
-    }
+  // ====== Ingredient CRUD (ringkas) ======
+  async function saveIngredient(ing: Ingredient){
+    if(!isAdmin) return alert("Khusus owner/admin.");
+    if(!ing.name) return alert("Nama bahan wajib.");
+    if(ing.id){ await updateDoc(doc(db,"ingredients",ing.id), ing as any); }
+    else { await addDoc(collection(db,"ingredients"), ing as any); }
+    await loadIngredients();
+  }
+  async function deleteIngredientById(id:string){
+    if(!isAdmin) return alert("Khusus owner/admin.");
+    if(!confirm("Hapus bahan ini?")) return;
+    await deleteDoc(doc(db,"ingredients",id));
+    await loadIngredients();
   }
 
-  // ---------- Loyalty helpers ----------
-  useEffect(() => { fetchCustomerPointsByPhone(customerPhone); }, [customerPhone]);
-
-  async function fetchCustomerPointsByPhone(phone: string) {
-    if (!phone) { setCustomerPoints(null); return; }
-    const ref = doc(db, "customers", phone);
-    const snap = await getDoc(ref);
-    setCustomerPoints(snap.exists() ? ((snap.data() as any).points || 0) : 0);
-  }
-
-  async function addLoyaltyPoints(phone: string, earned: number, saleId: string) {
-    if (!phone || earned <= 0) return;
-    const ref = doc(db, "customers", phone);
-    const snap = await getDoc(ref);
-    const base = snap.exists() ? (snap.data() as any) : { points: 0, visits: 0 };
-    await setDoc(ref, {
-      ...base,
-      name: customerName || base.name || "",
-      points: (base.points || 0) + earned,
-      visits: (base.visits || 0) + 1,
-      lastVisit: Date.now()
-    }, { merge: true });
-    await addDoc(collection(db, "loyalty_logs"), {
-      phone, pointsChange: earned, type: "earn", saleId, at: Date.now(), outletId
+  // ====== POS Helpers ======
+  function addToCart(p:Product){
+    setCart(prev=>{
+      const f = prev.find(x=>x.productId===p.id && (x.note||"")==(note||""));
+      if(f) return prev.map(x=>x===f?{...x, qty:x.qty+1}:x);
+      return [...prev, { productId: p.id!, name: p.name, price: p.price, qty:1, note: note||undefined }];
     });
   }
-
-  async function redeemLoyaltyPoints(phone: string, usePts: number, saleId: string) {
-    if (!phone || usePts <= 0) return;
-    const ref = doc(db, "customers", phone);
-    const snap = await getDoc(ref);
-    const current = snap.exists() ? ((snap.data() as any).points || 0) : 0;
-    const newPts = Math.max(0, current - usePts);
-    await setDoc(ref, { points: newPts }, { merge: true });
-    await addDoc(collection(db, "loyalty_logs"), {
-      phone, pointsChange: -usePts, type: "redeem", saleId, at: Date.now(), outletId
-    });
+  function inc(i:number){ setCart(prev=>prev.map((x,idx)=>idx===i?{...x,qty:x.qty+1}:x)); }
+  function dec(i:number){ setCart(prev=>prev.map((x,idx)=>idx===i?{...x,qty:Math.max(1,x.qty-1)}:x)); }
+  function rm(i:number){ setCart(prev=>prev.filter((_,idx)=>idx!==i)); }
+  function clearCartAll(){
+    setCart([]); setDiscount(0); setTaxRate(0); setServiceRate(0); setCash(0); setNote("");
+    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(0); setCustomerKnown(false);
   }
 
-  async function searchCustomerSuggest(prefix: string) {
-    const list: { phone: string; name?: string; points?: number }[] = [];
-    const ex = await getDoc(doc(db, "customers", prefix));
-    if (ex.exists()) {
-      const d = ex.data() as any;
-      list.push({ phone: prefix, name: d.name, points: d.points });
-    }
-    setCustomerSuggest(list);
-  }
-
-  // ---------- POS actions ----------
-  function addToCart(p: Product) {
-    setCart((c) => {
-      const ex = c.find((x) => x.productId === p.id);
-      if (ex) return c.map((x) => (x.productId === p.id ? { ...x, qty: x.qty + 1 } : x));
-      return [...c, { id: Math.random().toString(36).slice(2, 9), productId: p.id, name: p.name, price: p.price, qty: 1 }];
-    });
-  }
-  function inc(ci: CartItem) {
-    setCart((c) => c.map((x) => (x.id === ci.id ? { ...x, qty: x.qty + 1 } : x)));
-  }
-  function dec(ci: CartItem) {
-    setCart((c) => c.map((x) => (x.id === ci.id ? { ...x, qty: Math.max(1, x.qty - 1) } : x)));
-  }
-  function rm(ci: CartItem) {
-    setCart((c) => c.filter((x) => x.id !== ci.id));
-  }
-  function clearCart() {
-    setCart([]);
-    setCash(0);
-    setUsePoints(0);
-    setPayMethod("Tunai");
-    setCustomerPhone("");
-    setCustomerName("");
-  }
-
-  // ---------- Offline queue ----------
-  function pushPending(rec: any) {
-    const arr = JSON.parse(localStorage.getItem(K_PENDING_SALES) || "[]");
-    arr.unshift(rec);
-    localStorage.setItem(K_PENDING_SALES, JSON.stringify(arr));
-  }
-  async function hydratePendingQueue() {
-    if (!navigator.onLine) return;
-    const arr: any[] = JSON.parse(localStorage.getItem(K_PENDING_SALES) || "[]");
-    if (!arr.length) return;
-    for (const rec of [...arr].reverse()) {
-      try {
-        await addDoc(collection(db, "sales"), rec);
-        arr.shift();
-      } catch {}
-    }
-    localStorage.setItem(K_PENDING_SALES, JSON.stringify([]));
-  }
-  useEffect(() => { if (online) hydratePendingQueue(); }, [online]);
-
-  // ---------- Finalize ----------
-  async function finalizeSale() {
-    if (!cart.length) return alert("Keranjang kosong!");
-    if (usePoints > redeemCap) return alert("Poin yang digunakan melebihi batas.");
-    if (payMethod === "Tunai" && cash < finalTotal) return alert("Uang kurang!");
-
-    const saleId = Date.now().toString();
-    const earned = calcEarnedPoints(finalTotal);
-
-    if (customerPhone && customerName.trim()) {
-      await setDoc(doc(db, "customers", customerPhone), { name: customerName.trim() }, { merge: true });
-    }
-
-    const rec: SaleRow = {
-      time: new Date().toLocaleString("id-ID", { hour12: false }),
-      timeMs: Date.now(),
-      cashier: user?.email || "-",
-      outletId,
-      items: cart.map((i) => ({ name: i.name, qty: i.qty, price: i.price })),
-      subtotal,
-      discount: redeemValueRp,
-      taxRate: 0, serviceRate: 0, taxValue: 0, serviceValue: 0,
-      total: finalTotal,
-      payMethod,
-      cash: payMethod === "Tunai" ? cash : 0,
-      change: payMethod === "Tunai" ? Math.max(0, cash - finalTotal) : 0,
-      createdAt: serverTimestamp(),
-      customerPhone: customerPhone || null,
-      earnedPoints: earned,
-      redeemedPoints: usePoints || 0,
-      redeemValueRp,
-      deviceDate: Date.now(),
-    };
-
-    try {
-      if (navigator.onLine) {
-        await addDoc(collection(db, "sales"), rec);
-      } else {
-        pushPending(rec);
-      }
-
-      if (customerPhone) {
-        if (usePoints > 0) await redeemLoyaltyPoints(customerPhone, usePoints, saleId);
-        if (earned > 0) await addLoyaltyPoints(customerPhone, earned, saleId);
-        await fetchCustomerPointsByPhone(customerPhone);
-      }
-
-      await deductStockForSale({
-        saleId,
-        items: cart.map((c) => ({ productId: c.productId, name: c.name, qty: c.qty })),
-        recipes,
-        ingredientsMap: Object.fromEntries(ingredients.map((i) => [String(i.id), i])),
-      });
-
-      if (SHEETS_WEBHOOK) {
-        try {
-          fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "sale", outletId, ...rec }) });
-        } catch {}
-      }
-
-      printReceipt80mm({
-        ...rec,
-        subtotal,
-        total: finalTotal,
-        cash: rec.cash,
-        change: rec.change,
-      });
-
-      clearCart();
-      alert("Transaksi selesai ✅");
-    } catch (e: any) {
-      alert("Gagal menyimpan transaksi, disimpan ke antrian offline.");
-      pushPending(rec);
-    }
-  }
-
-  // ---------- Shift ----------
-  async function openShift() {
-    if (activeShift && !activeShift.closedAt) return alert("Shift masih aktif.");
-    const cashOpen = Number(prompt("Cash Drawer Awal (opsional)?") || 0);
-    const sh: ShiftDoc = { openedAt: Date.now(), openedBy: user?.email || "-", cashOpen, outletId };
-    const ref = await addDoc(collection(db, "shifts"), { ...sh, closedAt: null });
-    setActiveShift({ ...sh, id: ref.id, closedAt: null });
-
-    if (SHEETS_WEBHOOK) {
-      try { fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "shift_open", ...sh }) }); } catch {}
-    }
-    alert("Shift dibuka ✅");
-  }
-
-  // === GABUNGAN PERBAIKAN #1 + #2: getSalesRange & closeShift tanpa index gabungan ===
-  async function getSalesRange(startMs: number, endMs: number, outlet?: string) {
-    const base = collection(db, "sales");
-    // Query by tanggal saja (deviceDate) + orderBy → outlet difilter di memori
-    const qy = query(
-      base,
-      where("deviceDate", ">=", startMs),
-      where("deviceDate", "<", endMs),
-      orderBy("deviceDate", "desc")
-    );
-    const snap = await getDocs(qy);
-    const rows = snap.docs.map(d => ({ id: d.id, ...d.data() })) as any[];
-    return outlet ? rows.filter(r => (r.outletId || "") === outlet) : rows;
-  }
-
-  async function closeShift() {
-    if (!activeShift || activeShift.closedAt) {
-      alert("Tidak ada shift aktif."); 
-      return;
-    }
-
-    try {
-      // Rekap transaksi selama shift berjalan (tanpa index gabungan)
-      const rows = await getSalesRange(activeShift.openedAt, Date.now(), outletId);
-
-      const totals: Record<string, number> = {};
-      let trx = 0;
-      for (const r of rows) {
-        const m = String(r.payMethod || "Unknown");
-        totals[m] = (totals[m] || 0) + (Number(r.total) || 0);
-        trx++;
-      }
-
-      const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
-      const closedPayload = {
-        closedAt: Date.now(),
-        closedBy: user?.email || "-",
-        totals,
-        trxCount: trx,
-        cashClose
-      };
-
-      await updateDoc(doc(db, "shifts", activeShift.id!), closedPayload);
-      exportShiftCSV({ ...activeShift, ...closedPayload });
-
-      if (SHEETS_WEBHOOK) {
-        try {
-          fetch(SHEETS_WEBHOOK, { method: "POST", body: JSON.stringify({ type: "shift_close", outletId, ...activeShift, ...closedPayload }) });
-        } catch {}
-      }
-
-      setActiveShift(null);
-      alert("Shift ditutup ✅ dan CSV diunduh.");
-    } catch (err: any) {
-      console.error("closeShift error:", err);
-      // Fallback: tetap izinkan penutupan shift agar tidak nyangkut
-      if (confirm("Gagal merekap penjualan (mungkin butuh index Firestore). Tutup shift tanpa rekap?")) {
-        const cashClose = Number(prompt("Cash Drawer Akhir (opsional)?") || 0);
-        const closedPayload = {
-          closedAt: Date.now(),
-          closedBy: user?.email || "-",
-          totals: {},
-          trxCount: 0,
-          cashClose
-        };
-        try {
-          await updateDoc(doc(db, "shifts", activeShift.id!), closedPayload);
-          setActiveShift(null);
-          alert("Shift ditutup (tanpa rekap).");
-        } catch (e2:any) {
-          console.error(e2);
-          alert("Gagal menutup shift. Cek Rules Firestore & izin write koleksi 'shifts'.");
-        }
+  // ====== Inventory deduction (berdasar recipe) ======
+  async function deductInventoryForCart(cartItems: CartItem[]){
+    // Kumpulkan total kebutuhan per ingredientId
+    const need: Record<string, number> = {};
+    for(const ci of cartItems){
+      const p = products.find(pp=>pp.id===ci.productId);
+      if(!p?.recipe) continue;
+      for(const r of p.recipe){
+        need[r.ingredientId] = (need[r.ingredientId]||0) + (r.qty * ci.qty);
       }
     }
-  }
-
-  function exportShiftCSV(sh: ShiftDoc) {
-    const hdr = ["outlet", "openedAt", "openedBy", "closedAt", "closedBy", "trxCount", "cashOpen", "cashClose", "method", "amount"];
-    const lines = [hdr.join(",")];
-    const rows = Object.entries(sh.totals || { Unknown: 0 }).map(([m, a]) => [
-      outletId, sh.openedAt, sh.openedBy, sh.closedAt, sh.closedBy, sh.trxCount ?? 0, sh.cashOpen ?? 0, sh.cashClose ?? 0, m, a
-    ]);
-    for (const r of rows) lines.push(r.join(","));
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `shift_${outletId}_${sh.openedAt}_${sh.closedAt}.csv`; a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  // ---------- Laporan & Dashboard ----------
-  function ymdToMs(ymd: string) {
-    const [y, m, d] = ymd.split("-").map(Number);
-    return new Date(y, (m - 1), d, 0, 0, 0, 0).getTime();
-  }
-
-  async function getSalesRangeDates(startMs: number, endMs: number, outlet?: string) {
-    // helper kalau butuh range di laporan
-    return getSalesRange(startMs, endMs, outlet);
-  }
-
-  function summarizeSales(rows: any[]) {
-    const omzet = rows.reduce((s, r) => s + (r.total || 0), 0);
-    const trx = rows.length;
-    const aov = trx ? Math.round(omzet / trx) : 0;
-
-    const productCount: Record<string, number> = {};
-    const dayMap: Record<string, number> = {};
-    for (const r of rows) {
-      const date = new Date(r.deviceDate || r.timeMs).toISOString().slice(0, 10);
-      dayMap[date] = (dayMap[date] || 0) + (r.total || 0);
-      for (const it of (r.items || [])) {
-        productCount[it.name] = (productCount[it.name] || 0) + (it.qty || 0);
-      }
-    }
-    const top = Object.entries(productCount)
-      .sort((a, b) => b[1] - a[1]).slice(0, 5)
-      .map(([name, qty]) => ({ name, qty }));
-    const trend = Object.entries(dayMap).sort((a, b) => a[0].localeCompare(b[0])).map(([d, amt]) => ({ d, amt }));
-    return { omzet, trx, aov, top, trend };
-  }
-
-  async function loadReport() {
-    if (!from || !to) return alert("Pilih tanggal dari & sampai");
-    const start = ymdToMs(from);
-    const end = ymdToMs(to) + 24 * 60 * 60 * 1000;
-    const rows = await getSalesRangeDates(start, end, outletId);
-    setReport(summarizeSales(rows));
-  }
-
-  // ---------- Export ----------
-  function exportSalesCSV() {
-    const rows = visibleSales;
-    if (!rows.length) return alert("Tidak ada data.");
-    const hdr = ["time","outlet","payMethod","total","items"];
-    const lines = [hdr.join(",")];
-    for (const s of rows) {
-      const items = (s.items || []).map(it => `${it.name} x${it.qty}`).join("; ");
-      lines.push([s.time, s.outletId || "", s.payMethod, s.total, `"${String(items).replace(/"/g, '""')}"`].join(","));
-    }
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `sales_${outletId}_${Date.now()}.csv`; a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function exportReportCSV() {
-    const hdr = ["metric", "value"];
-    const lines = [
-      hdr.join(","),
-      ["omzet", report.omzet].join(","),
-      ["transaksi", report.trx].join(","),
-      ["AOV", report.aov].join(","),
-      "top_product,qty"
-    ];
-    for (const t of report.top) { lines.push([t.name, t.qty].join(",")); }
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = `report_${outletId}_${from}_${to}.csv`; a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  // ---------- Auth UI ----------
-  async function login() {
-    try {
-      await signInWithEmailAndPassword(getAuth(), email, pass);
-    } catch (e: any) {
-      alert("Login gagal: " + e.message);
+    // Update stok ingredient
+    const updates = Object.entries(need);
+    for(const [ingId, qty] of updates){
+      const ref = doc(db,"ingredients",ingId);
+      const snap = await getDoc(ref);
+      if(!snap.exists()) continue;
+      const cur = (snap.data() as any).stock || 0;
+      await updateDoc(ref, { stock: Math.max(0, cur - qty) });
     }
   }
-  async function logout() { await signOut(getAuth()); }
 
-  // ---------- Loyalty QR (optional) ----------
-  const loyaltyUrl = customerPhone ? `https://loyalty.chafumatcha.app/p/${encodeURIComponent(customerPhone)}` : "";
-  const loyaltyQR = customerPhone
-    ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(loyaltyUrl)}`
-    : "";
+  // ====== Printer 80mm dengan logo + QR loyalty ======
+  function printReceipt80mm(s: Sale){
+    const w = window.open("","_blank","width=420,height=700");
+    if(!w) return;
 
-  // ---------- UI: Login ----------
-  if (!user)
-    return (
-      <div style={{ padding: 20, maxWidth: 420, margin: "0 auto" }}>
-        <h2>CHAFU MATCHA POS — Login</h2>
-        <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-          <label>Outlet</label>
-          <select value={outletId} onChange={(e)=>setOutletId(e.target.value)}>
-            <option value="OUTLET-01">OUTLET-01</option>
-            <option value="OUTLET-02">OUTLET-02</option>
-            <option value="OUTLET-03">OUTLET-03</option>
-          </select>
-          <input placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input type="password" placeholder="Password" value={pass} onChange={(e) => setPass(e.target.value)} />
-          <button onClick={login} style={{ background: "#2e7d32", color: "#fff", padding: 10, borderRadius: 8 }}>Login</button>
-        </div>
-        <p style={{ fontSize: 12, opacity: .7, marginTop: 6 }}>Status: {online ? "Online" : "Offline (akan sync otomatis)"}</p>
-      </div>
-    );
+    const rows = s.items.map(i=>`
+      <tr>
+        <td>${i.name}${i.note?`<div style="font-size:10px;opacity:.7">${i.note}</div>`:""}</td>
+        <td style="text-align:center">${i.qty}x</td>
+        <td style="text-align:right">${(i.price*i.qty).toLocaleString("id-ID")}</td>
+      </tr>
+    `).join("");
 
-  // ---------- UI: Main ----------
-  return (
-    <div style={{ padding: 10, maxWidth: 1100, margin: "0 auto" }}>
-      <header style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <div>
-          <h1 style={{ margin: 0 }}>CHAFU MATCHA POS</h1>
-          <small>Outlet: </small>
-          <select value={outletId} onChange={(e)=>setOutletId(e.target.value)}>
-            <option value="OUTLET-01">OUTLET-01</option>
-            <option value="OUTLET-02">OUTLET-02</option>
-            <option value="OUTLET-03">OUTLET-03</option>
-          </select>
-          <small style={{ marginLeft: 8, color: online ? "#2e7d32" : "#c62828" }}>
-            {online ? "Online" : "Offline — transaksi akan diantrikan"}
-          </small>
-        </div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <button onClick={() => setTab("pos")}>POS</button>
-          {isAdmin && (
-            <>
-              <button onClick={() => setTab("produk")}>Produk</button>
-              <button onClick={() => setTab("inventori")}>Inventory</button>
-              <button onClick={() => setTab("resep")}>Resep</button>
-              <button onClick={() => setTab("riwayat")}>Riwayat</button>
-              <button onClick={() => setTab("laporan")}>Laporan</button>
-              <button onClick={() => setTab("dashboard")}>Dashboard</button>
-              <button onClick={() => setTab("loyalty")}>Loyalty</button>
-              <button onClick={openShift}>Buka Shift</button>
-              <button onClick={closeShift} style={{ background: "#263238", color: "#fff" }}>
-                Tutup Shift {activeShift ? "(aktif)" : ""}
-              </button>
-            </>
-          )}
-          <button onClick={logout} style={{ background: "#e53935", color: "#fff" }}>Logout</button>
-        </div>
-      </header>
+    const qr = s.loyaltyUrl
+      ? `https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(s.loyaltyUrl)}`
+      : "";
 
-      {/* POS */}
-      {tab === "pos" && (
-        <main style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          {/* Menu */}
-          <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
-            <h2>Menu</h2>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
-              {products.filter(p => p.active !== false).map((p) => (
-                <button key={p.id} onClick={() => addToCart(p)} style={{ textAlign: "left", border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
-                  <div>{p.name}</div>
-                  <small>{IDR(p.price)}</small>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          {/* Keranjang */}
-          <section style={{ border: "1px solid #ddd", borderRadius: 8, padding: 10 }}>
-            <h2>Keranjang</h2>
-
-            {/* Loyalty + katalog */}
-            <div>
-              <label>No HP (loyalty): </label>
-              <input
-                placeholder="08xxxx"
-                value={customerPhone}
-                onChange={(e) => { setCustomerPhone(e.target.value); if (e.target.value.length >= 3) searchCustomerSuggest(e.target.value); }}
-                list="cust-suggest"
-              />
-              <datalist id="cust-suggest">
-                {customerSuggest.map(c => (
-                  <option key={c.phone} value={c.phone}>{c.name ? `${c.phone} - ${c.name}` : c.phone}</option>
-                ))}
-              </datalist>
-
-              <div style={{ marginTop: 6, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                <input placeholder="Nama pelanggan (opsional)" value={customerName} onChange={(e) => setCustomerName(e.target.value)} />
-                {customerPhone && <small>Saldo poin: <b>{customerPoints ?? "-"}</b></small>}
-              </div>
-
-              {customerPhone && (
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}>
-                  <label>Gunakan Poin:</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={Math.max(0, redeemCap)}
-                    value={usePoints}
-                    onChange={(e) => {
-                      const v = Math.max(0, Math.min(Number(e.target.value) || 0, redeemCap));
-                      setUsePoints(v);
-                    }}
-                    style={{ width: 120 }}
-                  />
-                  <small>(Potongan: {IDR(redeemValueRp)})</small>
-                </div>
-              )}
-            </div>
-
-            {cart.length === 0 && <p style={{ marginTop: 8 }}>Belum ada item.</p>}
-            {cart.map((c) => (
-              <div key={c.id} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 8, alignItems: "center", margin: "6px 0" }}>
-                <div>{c.name} <small>x{c.qty}</small></div>
-                <div>{IDR(c.price * c.qty)}</div>
-                <div>
-                  <button onClick={() => dec(c)}>-</button>
-                  <button onClick={() => inc(c)}>+</button>
-                </div>
-                <button onClick={() => rm(c)}>Hapus</button>
-              </div>
-            ))}
-            <hr />
-            <div style={{ display: "grid", gap: 8 }}>
-              <div><b>Subtotal:</b> {IDR(subtotal)}</div>
-              {usePoints > 0 && <div><b>Potongan Poin:</b> -{IDR(redeemValueRp)}</div>}
-              <div><b>Total Bayar:</b> {IDR(finalTotal)}</div>
-
-              <div>
-                <label>Metode:</label>{" "}
-                <select value={payMethod} onChange={(e) => setPayMethod(e.target.value as PayMethod)}>
-                  {PAY_METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
-                </select>
-              </div>
-
-              {payMethod === "Tunai" ? (
-                <>
-                  <input type="number" placeholder="Uang diterima" value={cash} onChange={(e) => setCash(Number(e.target.value) || 0)} />
-                  <div><b>Kembali:</b> {IDR(change)}</div>
-                </>
-              ) : (
-                <div style={{ textAlign: "center" }}>
-                  <img src={walletQR[payMethod]} alt="QR" style={{ maxWidth: 240 }} />
-                  <p>Scan untuk bayar ({payMethod})</p>
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={clearCart}>Bersihkan</button>
-                <button style={{ background: "#2e7d32", color: "#fff", flex: 1 }} onClick={finalizeSale}>
-                  Selesaikan & Cetak
-                </button>
-              </div>
-            </div>
-          </section>
-        </main>
-      )}
-
-      {/* Produk */}
-      {tab === "produk" && isAdmin && (
-        <main style={{ marginTop: 12 }}>
-          <h2>Manajemen Produk</h2>
-          <ProductManager products={products} onChange={setProducts} />
-        </main>
-      )}
-
-      {/* Inventory */}
-      {tab === "inventori" && isAdmin && (
-        <main style={{ marginTop: 12 }}>
-          <h2>Inventory Bahan</h2>
-          <InventoryManager ingredients={ingredients} onChange={setIngredients} outletId={outletId} />
-        </main>
-      )}
-
-      {/* Resep */}
-      {tab === "resep" && isAdmin && (
-        <main style={{ marginTop: 12 }}>
-          <h2>Resep Produk</h2>
-          <RecipeManager
-            products={products}
-            ingredients={ingredients}
-            recipes={recipes}
-            onChange={setRecipes}
-          />
-        </main>
-      )}
-
-      {/* Riwayat */}
-      {tab === "riwayat" && isAdmin && (
-        <main style={{ marginTop: 12 }}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-            <h2>Riwayat Transaksi</h2>
-            <button onClick={exportSalesCSV}>Export CSV</button>
-          </div>
-          {visibleSales.length === 0 ? (
-            <p>Belum ada transaksi.</p>
-          ) : (
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead>
-                <tr>
-                  <th style={{ textAlign: "left" }}>Waktu</th>
-                  <th style={{ textAlign: "left" }}>Outlet</th>
-                  <th style={{ textAlign: "left" }}>Item</th>
-                  <th style={{ textAlign: "right" }}>Total</th>
-                  <th style={{ textAlign: "center" }}>Metode</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleSales.map((s) => (
-                  <tr key={s.id}>
-                    <td>{s.time}</td>
-                    <td>{s.outletId || "-"}</td>
-                    <td>{(s.items || []).map((it: any) => `${it.name} x${it.qty}`).join(", ")}</td>
-                    <td style={{ textAlign: "right" }}>{IDR(s.total)}</td>
-                    <td style={{ textAlign: "center" }}>{s.payMethod}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </main>
-      )}
-
-      {/* Laporan (range & summary) */}
-      {tab === "laporan" && isAdmin && (
-        <main style={{ marginTop: 12 }}>
-          <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-            <h2>Lap. Ringkas ({outletId})</h2>
-            <div style={{display:"flex", gap:8}}>
-              <button onClick={exportReportCSV}>Export CSV</button>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
-            <label>Dari:</label>
-            <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
-            <label>Sampai:</label>
-            <input type="date" value={to} onChange={e => setTo(e.target.value)} />
-            <button onClick={loadReport}>Terapkan</button>
-            <button onClick={() => {
-              const t = new Date();
-              const yyyy = t.getFullYear();
-              const mm = String(t.getMonth() + 1).padStart(2, "0");
-              const dd = String(t.getDate()).padStart(2, "0");
-              setFrom(`${yyyy}-${mm}-${dd}`); setTo(`${yyyy}-${mm}-${dd}`);
-            }}>Hari ini</button>
-            <button onClick={() => {
-              const end = new Date();
-              const start = new Date(end); start.setDate(end.getDate() - 6);
-              const f = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-              setFrom(f(start)); setTo(f(end));
-            }}>7 hari</button>
-            <button onClick={() => {
-              const t = new Date();
-              const f = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-01`;
-              const toStr = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
-              setFrom(f); setTo(toStr);
-            }}>Bulan ini</button>
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 12 }}>
-            <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Omzet</b><br />{IDR(report.omzet)}</div>
-            <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Transaksi</b><br />{report.trx}</div>
-            <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>AOV</b><br />{IDR(report.aov)}</div>
-          </div>
-
-          <h3 style={{ marginTop: 16 }}>Top Produk</h3>
-          {report.top.length === 0 ? <p>-</p> : (
-            <ul>
-              {report.top.map(t => <li key={t.name}>{t.name} — {t.qty} cup</li>)}
-            </ul>
-          )}
-        </main>
-      )}
-
-      {/* Owner Dashboard */}
-      {tab === "dashboard" && isAdmin && (
-        <DashboardView outletId={outletId} report={report} from={from} to={to} onRefresh={loadReport} ingredients={ingredients} />
-      )}
-
-      {/* Loyalty page (QR pelanggan) */}
-      {tab === "loyalty" && isAdmin && (
-        <main style={{ marginTop: 12 }}>
-          <h2>Digital Loyalty Card (Preview)</h2>
-          <p>Masukkan nomor HP pelanggan di tab POS → bagian loyalty. Halaman pelanggan:</p>
-          <code style={{ display:"block", wordBreak:"break-all", background:"#f8f8f8", padding:8, borderRadius:6 }}>
-            {customerPhone ? loyaltyUrl : "(isi No HP dulu di POS)"}
-          </code>
-          {customerPhone && (
-            <div style={{ marginTop: 10 }}>
-              <img src={loyaltyQR} alt="QR Pelanggan" />
-              <p style={{ fontSize:12, opacity:.7 }}>*QR ini menggunakan generator publik. Kamu bisa ganti ke generator lokal nanti.</p>
-            </div>
-          )}
-        </main>
-      )}
-    </div>
-  );
-}
-
-// ===================================================================================
-// Sub-Komponen
-// ===================================================================================
-
-function ProductManager({ products, onChange }: { products: Product[]; onChange: (x: Product[]) => void }) {
-  const [form, setForm] = useState<Product>({ id: 0, name: "", price: 0, active: true, category: "Signature" });
-
-  async function save() {
-    if (!form.id || !form.name || !form.price) return alert("ID, Nama, dan Harga wajib diisi!");
-    await upsertProduct(form);
-    onChange(await fetchProducts());
-    setForm({ id: 0, name: "", price: 0, active: true, category: "Signature" });
-  }
-
-  async function del(p: Product) {
-    if (!confirm(`Hapus ${p.name}?`)) return;
-    await removeProduct(p.id);
-    onChange(await fetchProducts());
-  }
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <input placeholder="ID (unik angka)" type="number" value={form.id || ""} onChange={(e) => setForm({ ...form, id: Number(e.target.value) })} />
-        <input placeholder="Nama" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input placeholder="Kategori" value={form.category || ""} onChange={(e) => setForm({ ...form, category: e.target.value })} />
-        <input placeholder="Harga" type="number" value={form.price || 0} onChange={(e) => setForm({ ...form, price: Number(e.target.value) })} />
-        <button onClick={save}>Simpan</button>
-      </div>
-      {products.map((p) => (
-        <div key={p.id} style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-          <span>{p.name} — {IDR(p.price)}</span>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setForm(p)}>Edit</button>
-            <button onClick={() => del(p)}>Hapus</button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function InventoryManager({ ingredients, onChange, outletId }: { ingredients: InvIngredient[]; onChange: (x: InvIngredient[]) => void; outletId: string }) {
-  const [form, setForm] = useState<InvIngredient>({ name: "", unit: "", stock: 0 });
-  const webhook = (import.meta as any).env?.VITE_SHEETS_WEBHOOK || "";
-
-  async function save() {
-    if (!form.name) return alert("Nama bahan wajib diisi!");
-    await upsertIngredient(form);
-    onChange(await fetchIngredients());
-    if (webhook) { try { fetch(webhook, { method: "POST", body: JSON.stringify({ type:"stock_upsert", outletId, ...form }) }); } catch {} }
-    setForm({ name: "", unit: "", stock: 0 });
-  }
-
-  async function del(i: InvIngredient) {
-    if (!confirm(`Hapus ${i.name}?`)) return;
-    await deleteIngredient(i.id!);
-    onChange(await fetchIngredients());
-    if (webhook) { try { fetch(webhook, { method: "POST", body: JSON.stringify({ type:"stock_delete", outletId, id:i.id }) }); } catch {} }
-  }
-
-  async function adjustItem(i: InvIngredient, delta: number) {
-    const current = Number(i.stock || 0);
-    const newStock = current + delta;
-    await adjustStock([{ ingredientId: String(i.id), newStock, note: delta > 0 ? `+${delta}` : `${delta}` }]);
-    onChange(await fetchIngredients());
-    if (webhook) { try { fetch(webhook, { method: "POST", body: JSON.stringify({ type:"stock_adjust", outletId, id:i.id, delta }) }); } catch {} }
-  }
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <input placeholder="Nama bahan" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-        <input placeholder="Satuan (ml/gr/pcs)" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
-        <input placeholder="Stok awal" type="number" value={form.stock || 0} onChange={(e) => setForm({ ...form, stock: Number(e.target.value) })} />
-        <button onClick={save}>Simpan</button>
-      </div>
-
-      {ingredients.map((i) => (
-        <div key={i.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-          <span>{i.name} ({i.stock} {i.unit})</span>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button onClick={() => adjustItem(i, 1)}>+1</button>
-            <button onClick={() => adjustItem(i, -1)}>-1</button>
-            <button onClick={() => setForm(i)}>Edit</button>
-            <button onClick={() => del(i)}>Hapus</button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function RecipeManager({
-  products,
-  ingredients,
-  recipes,
-  onChange,
-}: {
-  products: Product[];
-  ingredients: InvIngredient[];
-  recipes: RecipeDoc[];
-  onChange: (x: RecipeDoc[]) => void;
-}) {
-  const [selected, setSelected] = useState<number>(0);
-  const [temp, setTemp] = useState<{ [ingredientId: string]: number }>({}); // qty per gelas
-
-  useEffect(() => {
-    const found = recipes.find((r) => r.productId === selected);
-    if (!found) { setTemp({}); return; }
-    const map: { [k: string]: number } = {};
-    for (const it of (found.items || []) as any[]) {
-      if (it.ingredientId) map[it.ingredientId] = Number(it.qty || 0);
-    }
-    setTemp(map);
-  }, [selected, recipes]);
-
-  async function saveRecipe() {
-    if (!selected) return alert("Pilih produk dulu!");
-    const items = Object.entries(temp)
-      .filter(([, qty]) => (qty || 0) > 0)
-      .map(([ingredientId, qty]) => ({ ingredientId, qty }));
-    await setRecipeForProduct(selected, items);
-    const updated = await fetchRecipes();
-    onChange(updated);
-    alert("Resep disimpan!");
-  }
-
-  return (
-    <div>
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
-        <label>Pilih Produk:</label>
-        <select value={selected} onChange={(e) => setSelected(Number(e.target.value))}>
-          <option value={0}>-- pilih --</option>
-          {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-      </div>
-
-      {selected !== 0 && (
-        <>
-          <h4>Resep per 1 gelas</h4>
-          {ingredients.map((i) => (
-            <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-              <div style={{ flex: 1 }}>{i.name}</div>
-              <input
-                type="number"
-                placeholder="Qty"
-                style={{ width: 90 }}
-                value={temp[i.id!] ?? ""}
-                onChange={(e) =>
-                  setTemp({
-                    ...temp,
-                    [String(i.id)]: Number(e.target.value) || 0,
-                  })
-                }
-              />
-              <small>{i.unit}</small>
-            </div>
-          ))}
-          <button onClick={saveRecipe}>Simpan Resep</button>
-        </>
-      )}
-    </div>
-  );
-}
-
-function DashboardView({
-  outletId, report, from, to, onRefresh, ingredients
-}: {
-  outletId: string;
-  report: { omzet: number; trx: number; aov: number; top: { name: string; qty: number }[], trend: { d: string; amt: number }[] };
-  from: string; to: string; onRefresh: () => void;
-  ingredients: InvIngredient[];
-}) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    if (!ref.current) return;
-    const labels = report.trend.map(t => t.d.slice(5)); // MM-DD
-    const data = report.trend.map(t => t.amt);
-    drawLineChart(ref.current, labels, data);
-  }, [report]);
-
-  return (
-    <main style={{ marginTop: 12 }}>
-      <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-        <h2>Owner Dashboard — {outletId}</h2>
-        <button onClick={onRefresh}>Refresh</button>
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginTop: 12 }}>
-        <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Omzet</b><br />{IDR(report.omzet)}</div>
-        <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>Transaksi</b><br />{report.trx}</div>
-        <div style={{ padding: 10, border: "1px solid #eee", borderRadius: 8 }}><b>AOV</b><br />{IDR(report.aov)}</div>
-      </div>
-
-      <h3 style={{ marginTop: 16 }}>Tren Harian</h3>
-      <div style={{ width: "100%", height: 180, border: "1px solid #eee", borderRadius: 8, padding: 6 }}>
-        <canvas ref={ref} style={{ width: "100%", height: 160 }} />
-      </div>
-
-      <h3 style={{ marginTop: 16 }}>Top Produk</h3>
-      {report.top.length === 0 ? <p>-</p> : (
-        <ol>
-          {report.top.map(t => <li key={t.name}>{t.name} — {t.qty} cup</li>)}
-        </ol>
-      )}
-
-      <h3 style={{ marginTop: 16 }}>Stok Kritis</h3>
-      <ul>
-        {ingredients.filter(i => (i.stock || 0) <= 10).map(i => (
-          <li key={i.id}>{i.name}: {i.stock} {i.unit}</li>
-        ))}
-      </ul>
-
-      <p style={{ fontSize: 12, opacity:.7 }}>Periode: {from || "(pilih)"} s/d {to || "(pilih)"} — gunakan tab <b>Laporan</b> untuk set tanggal</p>
-    </main>
-  );
-}
-
-// ---------------- Print 80mm ----------------
-function printReceipt80mm(rec: {
-  time: string; cashier: string;
-  items: { name: string; qty: number; price: number }[];
-  subtotal: number; discount: number;
-  taxRate: number; serviceRate: number;
-  taxValue: number; serviceValue: number;
-  total: number; cash: number; change: number;
-}) {
-  const w = window.open("", "_blank", "width=420,height=700");
-  if (!w) return;
-
-  const rows = rec.items.map(
-    (i) => `<tr>
-      <td>${i.name}</td>
-      <td style='text-align:center'>${i.qty}x</td>
-      <td style='text-align:right'>${(i.price * i.qty).toLocaleString('id-ID')}</td>
-    </tr>`
-  ).join("");
-
-  const html = `
-<!doctype html>
-<html><head><meta charset="utf-8"><title>Struk</title>
+    const html = `
+<!doctype html><html><head><meta charset="utf-8"><title>Struk</title>
 <style>
   @media print { @page { size: 80mm auto; margin: 0; } body { margin:0; } }
   body { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -1249,24 +249,464 @@ function printReceipt80mm(rec: {
   td { padding: 2px 0; font-size: 12px; border-bottom: 1px dashed #ddd; }
   .tot td { border-bottom: none; font-weight: 700; }
   .meta { font-size: 11px; text-align: center; opacity: .8; }
+  .logo { display:block;margin:0 auto 6px auto;width:36mm;height:auto;image-rendering: pixelated; }
 </style></head>
 <body>
   <div class="wrap">
-    <h2>CHAFU MATCHA</h2>
-    <div class="meta">${new Date().toLocaleString("id-ID", { hour12:false })}<br/>Kasir: ${rec.cashier}</div>
+    <img src="/logo.png" class="logo" onerror="this.style.display='none'"/>
+    <h2>${SHOP_NAME}</h2>
+    <div class="meta">${OUTLET}<br/>Kasir: ${s.cashier}<br/>${new Date(s.time).toLocaleString("id-ID",{hour12:false})}</div>
     <hr/>
-    <table>
-      ${rows}
-      <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${rec.subtotal.toLocaleString("id-ID")}</td></tr>
-      ${rec.discount ? `<tr class="tot"><td>Potongan</td><td></td><td style="text-align:right">-${rec.discount.toLocaleString("id-ID")}</td></tr>` : ""}
-      <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${rec.total.toLocaleString("id-ID")}</td></tr>
-      ${rec.cash ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${rec.cash.toLocaleString("id-ID")}</td></tr>` : ""}
-      ${rec.cash ? `<tr><td>Kembali</td><td></td><td style='text-align:right'>${rec.change.toLocaleString("id-ID")}</td></tr>` : ""}
+    <table>${rows}
+      <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${s.subtotal.toLocaleString("id-ID")}</td></tr>
+      ${s.discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${s.discount.toLocaleString("id-ID")}</td></tr>`:""}
+      ${s.taxValue?`<tr class="tot"><td>Pajak (${s.taxRate}%)</td><td></td><td style="text-align:right">${s.taxValue.toLocaleString("id-ID")}</td></tr>`:""}
+      ${s.serviceValue?`<tr class="tot"><td>Service (${s.serviceRate}%)</td><td></td><td style="text-align:right">${s.serviceValue.toLocaleString("id-ID")}</td></tr>`:""}
+      <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${s.total.toLocaleString("id-ID")}</td></tr>
+      ${s.method==="cash" ? `
+        <tr><td>Tunai</td><td></td><td style="text-align:right">${s.cash.toLocaleString("id-ID")}</td></tr>
+        <tr><td>Kembali</td><td></td><td style="text-align:right">${s.change.toLocaleString("id-ID")}</td></tr>` : `
+        <tr><td>Pembayaran</td><td></td><td style="text-align:right">E-Wallet</td></tr>`
+      }
     </table>
+    ${qr ? `
+      <div class="meta" style="margin:8px 0 2px">Scan untuk cek poin loyalty</div>
+      <img src="${qr}" style="display:block;margin:0 auto 4px auto"/>
+      <div class="meta" style="word-break:break-all;font-size:10px">${s.loyaltyUrl}</div>
+    ` : ""}
     <p class="meta">Terima kasih! Follow @chafumatcha</p>
   </div>
   <script>window.print()</script>
 </body></html>`;
-  w.document.write(html);
-  w.document.close();
+    w.document.write(html); w.document.close();
+  }
+
+  // ====== Finalize Sale ======
+  async function finalize(){
+    if(cart.length===0) return alert("Keranjang kosong.");
+    if(method==="cash" && cash < total) return alert("Uang tunai kurang.");
+
+    const useLoyalty = /\d{6,}/.test(customerPhone.trim());
+    if(useLoyalty && !customerKnown && !customerName.trim()){
+      return alert("Nama pelanggan wajib diisi untuk nomor baru.");
+    }
+
+    // hitung poin
+    const pointsEarned = useLoyalty ? cart.reduce((s,i)=>s+i.qty,0) : 0;
+
+    // siapkan record transaksi
+    const s: Sale = {
+      time: new Date().toISOString(),
+      cashier: user?.email || "-",
+      items: cart,
+      subtotal, discount, taxRate, serviceRate,
+      taxValue, serviceValue,
+      total,
+      method,
+      cash: method==="cash" ? cash : 0,
+      change: method==="cash" ? change : 0,
+      outlet: OUTLET,
+      customerPhone: useLoyalty ? customerPhone.trim() : null,
+      customerName:  useLoyalty ? (customerKnown ? customerName : customerName.trim()) : null,
+      pointsEarned: pointsEarned || 0,
+      loyaltyUrl: useLoyalty ? loyaltyUrlFor(customerPhone) : null,
+    };
+
+    // simpan ke Firestore
+    const ref = await addDoc(collection(db,"sales"), {
+      ...s,
+      createdAt: serverTimestamp()
+    });
+    s.id = ref.id;
+
+    // update loyalty
+    if(useLoyalty){
+      if(!customerKnown) await createCustomer(customerPhone.trim(), customerName.trim());
+      await addLoyalty(customerPhone.trim(), pointsEarned, true);
+    }
+
+    // deduct stok
+    await deductInventoryForCart(cart);
+
+    // print
+    printReceipt80mm(s);
+
+    // refresh history ringan
+    setSales(prev=>[s, ...prev]);
+
+    // reset
+    clearCartAll();
+    alert("Transaksi tersimpan ✅");
+  }
+
+  // ====== UI sederhana ======
+  if(!user){
+    return (
+      <div style={wrap}>
+        <h2 style={{marginTop:8}}>{SHOP_NAME} — POS</h2>
+        <div style={card}>
+          <h3>Login</h3>
+          <input placeholder="Email" style={input} value={email} onChange={e=>setEmail(e.target.value)} />
+          <input placeholder="Password" type="password" style={input} value={pass} onChange={e=>setPass(e.target.value)} />
+          <button style={btnPrimary} onClick={async()=>{ try{ await signInWithEmailAndPassword(auth,email,pass); }catch(e:any){ alert(e.message); } }}>Masuk</button>
+          <p style={{fontSize:12,opacity:.6,marginTop:8}}>Owner/admin: hanya email terdaftar yang bisa ubah produk & inventori.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={wrap}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <img src="/logo.png" alt="logo" style={{width:36,height:36,objectFit:"contain",borderRadius:8}} onError={(e:any)=>e.currentTarget.style.display="none"} />
+          <div>
+            <h2 style={{margin:"4px 0"}}>{SHOP_NAME} — Kasir</h2>
+            <small>{OUTLET}</small>
+          </div>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <small>Masuk sebagai: {user.email} {isAdmin?"(owner)":"(staff)"}</small>
+          <button onClick={()=>setTab("pos")}>Kasir</button>
+          <button onClick={()=>{ setTab("history"); loadSales(); }}>Riwayat</button>
+          <button onClick={()=>setTab("products")}>Produk</button>
+          <button onClick={()=>setTab("inventory")}>Inventori</button>
+          <button onClick={()=>setTab("settings")}>Pengaturan</button>
+          <button style={btnDanger} onClick={()=>signOut(auth)}>Keluar</button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      {tab==="pos" && (
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12, marginTop:12}}>
+          {/* Menu */}
+          <div style={card}>
+            <h3>Menu</h3>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {products.filter(p=>p.active!==false).map(p=>(
+                <button key={p.id} style={tile} onClick={()=>addToCart(p)}>
+                  <div style={{fontWeight:600}}>{p.name}</div>
+                  <div style={{fontSize:12,opacity:.7}}>{p.category}</div>
+                  <div style={{marginTop:4}}>{IDR(p.price)}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Keranjang */}
+          <div style={card}>
+            <h3>Keranjang</h3>
+            {cart.length===0 ? <p style={{opacity:.7}}>Belum ada item.</p> : (
+              <ul style={{listStyle:"none",padding:0,margin:0, display:"grid",gap:8}}>
+                {cart.map((ci,idx)=>(
+                  <li key={idx} style={{border:"1px solid #eee",borderRadius:10,padding:8, display:"grid",gridTemplateColumns:"1fr auto auto",gap:10,alignItems:"center"}}>
+                    <div>
+                      <div style={{fontWeight:600}}>{ci.name}</div>
+                      {ci.note && <div style={{fontSize:12,opacity:.7}}>{ci.note}</div>}
+                    </div>
+                    <div>{IDR(ci.price)}</div>
+                    <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                      <button onClick={()=>dec(idx)}>-</button>
+                      <b>{ci.qty}</b>
+                      <button onClick={()=>inc(idx)}>+</button>
+                      <button onClick={()=>rm(idx)} style={{marginLeft:6}}>×</button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <div style={{marginTop:8, display:"grid", gap:8}}>
+              <input placeholder="Catatan (opsional)" style={input} value={note} onChange={e=>setNote(e.target.value)} />
+
+              <div style={row}><span>Subtotal</span><b>{IDR(subtotal)}</b></div>
+              <div style={row}><span>Pajak %</span>
+                <input type="number" style={inputSm} value={taxRate} onChange={e=>setTaxRate(Number(e.target.value)||0)} />
+              </div>
+              <div style={row}><span>Service %</span>
+                <input type="number" style={inputSm} value={serviceRate} onChange={e=>setServiceRate(Number(e.target.value)||0)} />
+              </div>
+              <div style={row}><span>Diskon (Rp)</span>
+                <input type="number" style={inputSm} value={discount} onChange={e=>setDiscount(Number(e.target.value)||0)} />
+              </div>
+              <div style={{...row, fontSize:18}}><span>Total</span><span>{IDR(total)}</span></div>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                <select value={method} onChange={e=>setMethod(e.target.value as any)} style={input}>
+                  <option value="cash">Cash</option>
+                  <option value="ewallet">E-Wallet</option>
+                </select>
+                {method==="cash" ? (
+                  <input type="number" placeholder="Tunai (Rp)" style={input} value={cash} onChange={e=>setCash(Number(e.target.value)||0)} />
+                ) : (
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <img src="/qris.png" alt="QRIS" style={{height:40,objectFit:"contain"}} onError={(e:any)=>e.currentTarget.style.display="none"} />
+                    <small>Scan QRIS untuk bayar.</small>
+                  </div>
+                )}
+              </div>
+
+              {/* Loyalty */}
+              <div style={{borderTop:"1px dashed #ddd", paddingTop:8}}>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                  <input placeholder="No HP (opsional)" style={input} value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} />
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <input
+                      placeholder={customerKnown ? "Nama otomatis" : "Nama (wajib jika baru)"}
+                      style={{...input, flex:1, background:customerKnown?"#f3f4f6":"#fff"}}
+                      value={customerName}
+                      disabled={customerKnown}
+                      onChange={e=>setCustomerName(e.target.value)}
+                    />
+                    <span style={{border:"1px solid #e5e7eb",borderRadius:999,padding:"6px 10px",fontSize:12}}>
+                      {lookingUp ? "cek..." : `Poin: ${customerPoints}`}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{display:"flex",gap:8,justifyContent:"space-between"}}>
+                <button onClick={clearCartAll}>Bersihkan</button>
+                <button style={btnPrimary} disabled={cart.length===0 || (method==="cash" && cash<total)} onClick={finalize}>
+                  Selesaikan & Cetak
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab==="history" && (
+        <div style={{...card, marginTop:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <h3>Riwayat Transaksi</h3>
+            <button onClick={loadSales}>{loading?"Memuat...":"Muat Ulang"}</button>
+          </div>
+          {sales.length===0 ? <p style={{opacity:.7}}>Belum ada transaksi.</p> : (
+            <div style={{overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <thead>
+                  <tr>
+                    <th style={th}>Waktu</th>
+                    <th style={th}>ID</th>
+                    <th style={th}>Item</th>
+                    <th style={thRight}>Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sales.map(s=>(
+                    <tr key={s.id}>
+                      <td style={td}>{new Date(s.time).toLocaleString("id-ID",{hour12:false})}</td>
+                      <td style={td}>{s.id}</td>
+                      <td style={td}>{s.items.map(i=>`${i.name} x${i.qty}`).join(", ")}</td>
+                      <td style={tdRight}>{IDR(s.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab==="products" && (
+        <ProductsCard
+          isAdmin={isAdmin}
+          products={products}
+          ingredients={ingredients}
+          onSave={saveProduct}
+          onDelete={deleteProductById}
+        />
+      )}
+
+      {tab==="inventory" && (
+        <InventoryCard
+          isAdmin={isAdmin}
+          ingredients={ingredients}
+          onSave={saveIngredient}
+          onDelete={deleteIngredientById}
+        />
+      )}
+
+      {tab==="settings" && (
+        <div style={{...card, marginTop:12}}>
+          <h3>Pengaturan</h3>
+          <p>• Nama toko: <b>{SHOP_NAME}</b></p>
+          <p>• Outlet: <b>{OUTLET}</b></p>
+          <p>• Owner/Admin:</p>
+          <ul>
+            {ADMIN_EMAILS.map(m=><li key={m}>{m}</li>)}
+          </ul>
+          <p style={{fontSize:12,opacity:.7}}>Logo letakkan di <code>public/logo.png</code>. QRIS di <code>public/qris.png</code> (opsional).</p>
+        </div>
+      )}
+    </div>
+  );
 }
+
+// ==== Sub-komponen Products (dengan recipe) ====
+function ProductsCard({ isAdmin, products, ingredients, onSave, onDelete }:{
+  isAdmin:boolean;
+  products: Product[];
+  ingredients: Ingredient[];
+  onSave:(p:Product)=>void|Promise<void>;
+  onDelete:(id:string)=>void|Promise<void>;
+}){
+  const empty: Product = { name:"", price:0, category:"Signature", active:true, recipe:[] };
+  const [form, setForm] = useState<Product>(empty);
+
+  function addRecipeRow(){
+    setForm(f=>({ ...f, recipe: [...(f.recipe||[]), { ingredientId: ingredients[0]?.id || "", qty: 1 }] }));
+  }
+  function updateRecipe(idx:number, patch: Partial<{ingredientId:string;qty:number}>){
+    setForm(f=>{
+      const r = [...(f.recipe||[])];
+      r[idx] = { ...r[idx], ...patch } as any;
+      return { ...f, recipe: r };
+    });
+  }
+  function rmRecipe(idx:number){
+    setForm(f=>{
+      const r = [...(f.recipe||[])];
+      r.splice(idx,1);
+      return { ...f, recipe: r };
+    });
+  }
+
+  return (
+    <div style={{...card, marginTop:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <h3>Produk</h3>
+        <button onClick={()=>setForm(empty)}>Produk Baru</button>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr auto",gap:8,alignItems:"center",marginBottom:8}}>
+        <input style={input} placeholder="Nama" value={form.name} onChange={e=>setForm({...form, name:e.target.value})}/>
+        <input style={input} placeholder="Kategori" value={form.category} onChange={e=>setForm({...form, category:e.target.value})}/>
+        <input style={input} type="number" placeholder="Harga" value={form.price} onChange={e=>setForm({...form, price:Number(e.target.value)||0})}/>
+        <label style={{fontSize:12}}><input type="checkbox" checked={form.active!==false} onChange={e=>setForm({...form, active: e.target.checked})}/> Aktif</label>
+      </div>
+
+      <div style={{border:"1px dashed #ddd",borderRadius:10,padding:8,marginBottom:8}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <b>Recipe (Inventori)</b>
+          <button onClick={addRecipeRow}>+ Bahan</button>
+        </div>
+        {(form.recipe||[]).length===0 ? <p style={{opacity:.7}}>Belum ada bahan.</p> : (
+          <div style={{display:"grid",gridTemplateColumns:"2fr 1fr auto",gap:8}}>
+            {form.recipe!.map((r,idx)=>(
+              <React.Fragment key={idx}>
+                <select style={input} value={r.ingredientId} onChange={e=>updateRecipe(idx,{ingredientId:e.target.value})}>
+                  {ingredients.map(ing=><option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
+                </select>
+                <input style={input} type="number" min={0} step="0.01" value={r.qty} onChange={e=>updateRecipe(idx,{qty:Number(e.target.value)||0})}/>
+                <button onClick={()=>rmRecipe(idx)}>Hapus</button>
+              </React.Fragment>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div style={{display:"flex",gap:8}}>
+        <button style={btnPrimary} disabled={!isAdmin} onClick={()=>onSave(form)}>{form.id?"Simpan Perubahan":"Tambah Produk"}</button>
+        {form.id && <button style={btnDanger} disabled={!isAdmin} onClick={()=>onDelete(form.id!)}>Hapus</button>}
+      </div>
+
+      <hr style={{margin:"16px 0"}}/>
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead>
+            <tr>
+              <th style={th}>Nama</th>
+              <th style={th}>Kategori</th>
+              <th style={thRight}>Harga</th>
+              <th style={th}>Aktif</th>
+              <th style={thRight}>Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            {products.map(p=>(
+              <tr key={p.id}>
+                <td style={td}>{p.name}</td>
+                <td style={td}>{p.category}</td>
+                <td style={tdRight}>{IDR(p.price)}</td>
+                <td style={td}>{p.active!==false?"Ya":"Tidak"}</td>
+                <td style={tdRight}>
+                  <button onClick={()=>setForm(p)}>Edit</button>
+                  <button onClick={()=>onDelete(p.id!)} style={{marginLeft:6}}>Hapus</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ==== Sub-komponen Inventory ====
+function InventoryCard({ isAdmin, ingredients, onSave, onDelete }:{
+  isAdmin:boolean;
+  ingredients: Ingredient[];
+  onSave:(i:Ingredient)=>void|Promise<void>;
+  onDelete:(id:string)=>void|Promise<void>;
+}){
+  const empty: Ingredient = { name:"", unit:"gr", stock:0, low:10 };
+  const [form, setForm] = useState<Ingredient>(empty);
+
+  return (
+    <div style={{...card, marginTop:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <h3>Inventori</h3>
+        <button onClick={()=>setForm(empty)}>Bahan Baru</button>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr 1fr auto",gap:8,alignItems:"center",marginBottom:8}}>
+        <input style={input} placeholder="Nama bahan" value={form.name} onChange={e=>setForm({...form, name:e.target.value})}/>
+        <input style={input} placeholder="Unit (gr/ml/pcs)" value={form.unit} onChange={e=>setForm({...form, unit:e.target.value})}/>
+        <input style={input} type="number" placeholder="Stok" value={form.stock} onChange={e=>setForm({...form, stock:Number(e.target.value)||0})}/>
+        <input style={input} type="number" placeholder="Ambang (low)" value={form.low||0} onChange={e=>setForm({...form, low:Number(e.target.value)||0})}/>
+        <button style={btnPrimary} disabled={!isAdmin} onClick={()=>onSave(form)}>{form.id?"Simpan":"Tambah"}</button>
+      </div>
+
+      <div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse"}}>
+          <thead>
+            <tr>
+              <th style={th}>Nama</th><th style={th}>Unit</th><th style={thRight}>Stok</th><th style={thRight}>Low</th><th style={thRight}>Aksi</th>
+            </tr>
+          </thead>
+          <tbody>
+            {ingredients.map(i=>(
+              <tr key={i.id} style={{background: (i.stock<= (i.low||0)) ? "#fff7ed" : undefined}}>
+                <td style={td}>{i.name}</td>
+                <td style={td}>{i.unit}</td>
+                <td style={tdRight}>{i.stock}</td>
+                <td style={tdRight}>{i.low||0}</td>
+                <td style={tdRight}>
+                  <button onClick={()=>setForm(i)}>Edit</button>
+                  <button onClick={()=>onDelete(i.id!)} style={{marginLeft:6}}>Hapus</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ==== Styles kecil ====
+const wrap: React.CSSProperties = { padding: 12, maxWidth: 1100, margin: "0 auto" };
+const card: React.CSSProperties = { border:"1px solid #e5e7eb", borderRadius:12, padding:12, background:"#fff" };
+const input: React.CSSProperties = { border:"1px solid #e5e7eb", borderRadius:8, padding:"10px 12px", width:"100%" };
+const inputSm: React.CSSProperties = { ...input, width:140 };
+const row: React.CSSProperties = { display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 };
+const tile: React.CSSProperties = { textAlign:"left", border:"1px solid #e5e7eb", borderRadius:12, padding:10, background:"#fff" };
+const btnPrimary: React.CSSProperties = { border:"1px solid #2e7d32", background:"#2e7d32", color:"#fff", padding:"8px 12px", borderRadius:10 };
+const btnDanger: React.CSSProperties = { border:"1px solid #e53935", background:"#e53935", color:"#fff", padding:"8px 12px", borderRadius:10 };
+const th: React.CSSProperties = { textAlign:"left", borderBottom:"1px solid #e5e7eb", padding:"10px 8px" };
+const thRight: React.CSSProperties = { ...th, textAlign:"right" };
+const td: React.CSSProperties = { borderBottom:"1px solid #f3f4f6", padding:"8px" };
+const tdRight: React.CSSProperties = { ...td, textAlign:"right" };
