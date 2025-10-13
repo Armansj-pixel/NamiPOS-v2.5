@@ -1,15 +1,53 @@
-
-<!DOCTYPE html>
+<!doctype html>
 <html lang="id">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="manifest" href="/manifest.json">
-    <meta name="theme-color" content="#166534">
-    <link rel="icon" href="/icons/icon-192.png" />
-    <title>CHAFU MATCHA POS</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#059669" />
+    <title>CHAFU MATCHA — POS</title>
+
+    <!-- Tailwind CDN (paling gampang, tanpa setup tambahan) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // optional: kustom palet hijau matcha
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              matcha: {
+                50: "#f1f7f2",
+                100: "#e4efe6",
+                200: "#c3e0ca",
+                300: "#9ed1ac",
+                400: "#76c08d",
+                500: "#4cad70",
+                600: "#2f965a", // utama
+                700: "#23764a",
+                800: "#1d5c3b",
+                900: "#164a31"
+              }
+            }
+          }
+        }
+      };
+    </script>
+
+    <!-- OPTIONAL: font supaya lebih halus -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      html,body,#root{height:100%}
+      body{font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+    </style>
   </head>
-  <body>
+  <body class="bg-neutral-50">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
