@@ -200,44 +200,70 @@ export default function App() {
   async function doLogout(){ await signOut(auth); }
 
   /* ==========================
-     SHIFT
+     SHIFT (PATCHED)
   =========================== */
   async function checkActiveShift(){
-    const qShift = query(
-      collection(db,"shifts"),
-      where("outlet","==",OUTLET),
-      where("isOpen","==",true),
-      orderBy("openAt","desc"),
-      limit(1)
-    );
-    const snap = await getDocs(qShift);
-    if(snap.empty){ setActiveShift(null); return; }
-    const d = snap.docs[0];
-    const x = d.data() as any;
-    setActiveShift({
-      id:d.id, outlet:x.outlet, openBy:x.openBy,
-      openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
-    });
+    try {
+      const qShift = query(
+        collection(db,"shifts"),
+        where("outlet","==",OUTLET),
+        where("isOpen","==",true),
+        orderBy("openAt","desc"),
+        limit(1)
+      );
+      const snap = await getDocs(qShift);
+      if(snap.empty){ setActiveShift(null); return; }
+      const d = snap.docs[0];
+      const x = d.data() as any;
+      setActiveShift({
+        id:d.id, outlet:x.outlet, openBy:x.openBy,
+        openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
+      });
+    } catch (e:any) {
+      console.error("checkActiveShift error:", e?.message||e);
+      alert(
+        "Gagal cek shift aktif.\nKemungkinan perlu Firestore index untuk koleksi 'shifts':\n" +
+        "outlet(ASC), isOpen(ASC), openAt(DESC)\n\n" + (e?.message||e)
+      );
+      setActiveShift(null);
+    }
   }
 
   async function openShiftAction(){
     if(!user?.email) return alert("Belum login.");
-    const id = `SHIFT-${Date.now()}`;
-    await setDoc(doc(db,"shifts", id), {
-      outlet: OUTLET, openBy: user.email, openAt: serverTimestamp(),
-      closeAt: null, isOpen: true, openCash
-    });
-    setOpenCash(0);
-    await checkActiveShift();
+    try{
+      const id = `SHIFT-${Date.now()}`;
+      await setDoc(doc(db,"shifts", id), {
+        outlet: OUTLET,
+        openBy: user.email,
+        openAt: serverTimestamp(),
+        closeAt: null,
+        isOpen: true,
+        openCash: Number(openCash)||0
+      });
+      setOpenCash(0);
+      await checkActiveShift();
+      alert("Shift dibuka.");
+    }catch(e:any){
+      console.error("openShiftAction error:", e?.message||e);
+      alert("Gagal membuka shift: " + (e?.message||e));
+    }
   }
 
   async function closeShiftAction(){
-    if(!activeShift?.id) return;
-    await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
-    setActiveShift(null);
-    alert("Shift ditutup.");
-    // refresh dashboard
-    loadDashboard().catch(()=>{});
+    if(!activeShift?.id) return alert("Tidak ada shift aktif.");
+    try{
+      await updateDoc(doc(db,"shifts", activeShift.id), {
+        isOpen:false,
+        closeAt: serverTimestamp()
+      });
+      setActiveShift(null);
+      alert("Shift ditutup.");
+      loadDashboard().catch(()=>{});
+    }catch(e:any){
+      console.error("closeShiftAction error:", e?.message||e);
+      alert("Gagal menutup shift: " + (e?.message||e));
+    }
   }
 
   /* ==========================
