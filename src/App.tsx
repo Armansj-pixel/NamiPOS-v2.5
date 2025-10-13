@@ -42,6 +42,9 @@ type Sale = {
 ========================== */
 const uid = () => Math.random().toString(36).slice(2, 10);
 const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
+const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
+const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
+const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
 
 /* ==========================
    APP
@@ -51,8 +54,8 @@ export default function App() {
   const [user, setUser] = useState<null | { email: string }>(null);
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
-  /* ---- ui ---- */
-  const [tab, setTab] = useState<"pos"|"history"|"products"|"inventory">("pos");
+  /* ---- tabs ---- */
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
@@ -86,6 +89,11 @@ export default function App() {
   const [historyRows, setHistoryRows] = useState<Sale[]>([]);
   const [histCursor, setHistCursor] = useState<any>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
+
+  /* ---- dashboard ---- */
+  const [dashLoading, setDashLoading] = useState(false);
+  const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
+  const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -136,6 +144,8 @@ export default function App() {
 
     // shift
     checkActiveShift().catch(e=>console.warn(e));
+    // dashboard awal
+    loadDashboard().catch(()=>{});
 
     return ()=>{ unsubProd(); unsubIng(); };
     // eslint-disable-next-line
@@ -150,6 +160,7 @@ export default function App() {
       setAuthLoading(true);
       await signInWithEmailAndPassword(auth, email.trim(), password);
       setEmail(""); setPassword("");
+      setTab("pos");
     }catch(err:any){
       alert("Login gagal: "+(err?.message||err));
     }finally{ setAuthLoading(false); }
@@ -193,6 +204,8 @@ export default function App() {
     await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
     setActiveShift(null);
     alert("Shift ditutup.");
+    // refresh dashboard
+    loadDashboard().catch(()=>{});
   }
 
   /* ==========================
@@ -304,6 +317,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       printReceipt(payload, ref.id);
       clearCart();
       if(tab==="history") loadHistory(false);
+      if(isOwner && tab==="dashboard") loadDashboard().catch(()=>{});
 
     }catch(err:any){
       alert("Transaksi gagal disimpan: "+(err?.message||err));
@@ -345,6 +359,71 @@ img{display:block;margin:0 auto 6px;height:42px}
   }
 
   /* ==========================
+     DASHBOARD OWNER
+  =========================== */
+  async function loadDashboard(){
+    if(!isOwner) return;
+    setDashLoading(true);
+    try {
+      // Hari ini
+      const qToday = query(
+        collection(db,"sales"),
+        where("outlet","==",OUTLET),
+        where("time", ">=", Timestamp.fromDate(startOfDay())),
+        where("time", "<=", Timestamp.fromDate(endOfDay())),
+        orderBy("time","desc")
+      );
+      const sToday = await getDocs(qToday);
+      let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
+      const counter = new Map<string, number>();
+      sToday.docs.forEach(d=>{
+        const x = d.data() as any;
+        omzet += x.total||0; trx += 1;
+        if(x.payMethod==="cash") cashSum += x.total||0;
+        if(x.payMethod==="ewallet") ew += x.total||0;
+        if(x.payMethod==="qris") qr += x.total||0;
+        (x.items||[]).forEach((it:any)=>{
+          counter.set(it.name, (counter.get(it.name)||0) + (it.qty||0));
+        });
+      });
+      const avg = trx? Math.round(omzet/trx) : 0;
+      const topItems = Array.from(counter.entries())
+        .map(([name,qty])=>({name,qty}))
+        .sort((a,b)=>b.qty-a.qty)
+        .slice(0,5);
+
+      setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
+
+      // 7 hari terakhir (H-6 s.d H)
+      const from7 = startOfDay(daysAgo(6));
+      const q7 = query(
+        collection(db,"sales"),
+        where("outlet","==",OUTLET),
+        where("time", ">=", Timestamp.fromDate(from7)),
+        where("time", "<=", Timestamp.fromDate(endOfDay())),
+        orderBy("time","asc")
+      );
+      const s7 = await getDocs(q7);
+      const bucket = new Map<string, {omzet:number; trx:number}>();
+      for(let i=6;i>=0;i--){
+        const d = startOfDay(daysAgo(i)); const key = d.toISOString().slice(0,10);
+        bucket.set(key,{omzet:0,trx:0});
+      }
+      s7.docs.forEach(d=>{
+        const x=d.data() as any;
+        const key = new Date(x.time?.toDate?.() || Date.now()).toISOString().slice(0,10);
+        if(!bucket.has(key)) bucket.set(key,{omzet:0,trx:0});
+        const cur = bucket.get(key)!;
+        cur.omzet += x.total||0; cur.trx += 1;
+      });
+      const arr = Array.from(bucket.entries()).map(([date,v])=>({date, ...v}));
+      setLast7(arr);
+    } finally {
+      setDashLoading(false);
+    }
+  }
+
+  /* ==========================
      OWNER: PRODUCTS & INVENTORY
   =========================== */
   async function upsertProduct(p: Partial<Product> & { id?: string }){
@@ -359,7 +438,6 @@ img{display:block;margin:0 auto 6px;height:42px}
     if(!isOwner) return alert("Akses khusus owner.");
     await updateDoc(doc(db,"products", id), { active:false });
   }
-
   async function upsertIngredient(i: Partial<Ingredient> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = i.id || uid();
@@ -372,18 +450,23 @@ img{display:block;margin:0 auto 6px;height:42px}
   /* ==========================
      UI
   =========================== */
-
   if(!user){
     return (
-      <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-white rounded-2xl shadow p-6">
-          <h1 className="text-2xl font-bold mb-4">CHAFU MATCHA — POS</h1>
+      <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 border">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="h-10 w-10 rounded-2xl bg-emerald-600" />
+            <div>
+              <h1 className="text-2xl font-bold">CHAFU MATCHA — POS</h1>
+              <p className="text-xs text-neutral-500">@{OUTLET}</p>
+            </div>
+          </div>
           <form onSubmit={doLogin} className="space-y-3">
             <input className="w-full border rounded-lg p-3" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
             <input className="w-full border rounded-lg p-3" type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
             <button disabled={authLoading} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg p-3">{authLoading?"Masuk...":"Masuk"}</button>
           </form>
-          <p className="text-xs text-neutral-500 mt-3">Outlet: {OUTLET}</p>
+          <p className="text-xs text-neutral-500 mt-3">Hanya staf & owner yang diizinkan.</p>
         </div>
       </div>
     );
@@ -391,52 +474,106 @@ img{display:block;margin:0 auto 6px;height:42px}
 
   return (
     <div className="min-h-screen bg-neutral-50">
-      <div className="max-w-6xl mx-auto p-3 sm:p-4 md:p-6">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <h1 className="text-2xl md:text-3xl font-bold">CHAFU MATCHA — Kasir</h1>
-            <div className="text-xs text-neutral-500">@{OUTLET}</div>
-            <div className="mt-2 inline-block text-xs px-3 py-1 rounded-full border bg-white">
-              {activeShift?.isOpen
-                ? <>Shift <b>OPEN</b> — {new Date(activeShift.openAt?.toDate?.() || new Date()).toLocaleTimeString("id-ID",{hour12:false})} by {activeShift.openBy}</>
-                : <>Belum ada shift aktif</>}
+      {/* Topbar */}
+      <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b">
+        <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="h-8 w-8 rounded-xl bg-emerald-600" />
+            <div>
+              <div className="font-bold">CHAFU MATCHA — {OUTLET}</div>
+              <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
             </div>
           </div>
-          <div className="flex gap-2">
-            <button className={`px-3 py-2 rounded-lg border ${tab==="pos"?"bg-white":""}`} onClick={()=>setTab("pos")}>Kasir</button>
-            <button className={`px-3 py-2 rounded-lg border ${tab==="history"?"bg-white":""}`} onClick={()=>{ setTab("history"); loadHistory(false); }}>Riwayat</button>
-            {isOwner && <button className={`px-3 py-2 rounded-lg border ${tab==="products"?"bg-white":""}`} onClick={()=>setTab("products")}>Produk</button>}
-            {isOwner && <button className={`px-3 py-2 rounded-lg border ${tab==="inventory"?"bg-white":""}`} onClick={()=>setTab("inventory")}>Inventori</button>}
-            <button className="px-3 py-2 rounded-lg border bg-red-50" onClick={doLogout}>Keluar</button>
+          <nav className="flex gap-2">
+            {isOwner && <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Dashboard</button>}
+            <button onClick={()=>setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Kasir</button>
+            <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
+            {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
+            {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
+            <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
+          </nav>
+        </div>
+      </header>
+
+      <main className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-4">
+        {/* Shift badge */}
+        <div className="mb-3">
+          <div className="inline-flex items-center gap-2 text-xs px-3 py-1 rounded-full border bg-white">
+            {activeShift?.isOpen
+              ? <>Shift <b>OPEN</b> • {new Date(activeShift.openAt?.toDate?.() || new Date()).toLocaleTimeString("id-ID",{hour12:false})} • {activeShift.openBy}</>
+              : <>Belum ada shift aktif</>}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {!activeShift?.isOpen ? (
+              <>
+                <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Kas awal (Rp)" value={openCash} onChange={e=>setOpenCash(Number(e.target.value)||0)} />
+                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>Buka Shift</button>
+              </>
+            ) : (
+              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>Tutup Shift</button>
+            )}
           </div>
         </div>
 
-        {/* Shift control */}
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          {!activeShift?.isOpen ? (
-            <>
-              <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Kas awal (Rp)" value={openCash} onChange={e=>setOpenCash(Number(e.target.value)||0)} />
-              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>Buka Shift</button>
-            </>
-          ) : (
-            <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>Tutup Shift</button>
-          )}
-          <div className="text-xs text-neutral-500 ml-2">Login: {user.email}{isOwner?" (owner)":" (staff)"}</div>
-        </div>
+        {/* DASHBOARD */}
+        {tab==="dashboard" && isOwner && (
+          <section className="space-y-4">
+            {/* KPIs */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
+              <KPI title="Transaksi" value={String(todayStats.trx)} />
+              <KPI title="Avg Ticket" value={IDR(todayStats.avg)} />
+              <KPI title="Cash" value={IDR(todayStats.cash)} />
+              <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
+            </div>
 
-        {/* Tabs */}
+            {/* Top items + 7-day trend */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="bg-white border rounded-2xl p-4">
+                <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
+                <table className="w-full text-sm">
+                  <thead><tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr></thead>
+                  <tbody>
+                    {todayStats.topItems.length===0 && <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>}
+                    {todayStats.topItems.map((t,i)=>(
+                      <tr key={i} className="border-b"><td className="py-2">{t.name}</td><td className="text-right">{t.qty}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="bg-white border rounded-2xl p-4">
+                <div className="font-semibold mb-2">7 Hari Terakhir</div>
+                <div className="space-y-1">
+                  {dashLoading && <div className="text-sm text-neutral-500">Memuat…</div>}
+                  {!dashLoading && last7.map((d)=>(
+                    <div key={d.date} className="flex items-center gap-3">
+                      <div className="w-24 text-xs text-neutral-600">{d.date}</div>
+                      <div className="flex-1 h-2 rounded bg-neutral-100 overflow-hidden">
+                        <div className="h-2 rounded bg-emerald-500" style={{width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x=>x.omzet))))) * 100}%`}} />
+                      </div>
+                      <div className="w-28 text-right text-xs">{IDR(d.omzet)}</div>
+                      <div className="w-10 text-right text-xs">{d.trx}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* POS */}
         {tab==="pos" && (
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-            {/* Product list */}
+          <section className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            {/* Products */}
             <div className="md:col-span-7">
               <div className="bg-white rounded-2xl border p-3 mb-2">
                 <input className="border rounded-lg px-3 py-2 w-full" placeholder="Cari menu…" value={queryText} onChange={e=>setQueryText(e.target.value)} />
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                 {filteredProducts.map(p=>(
                   <button key={p.id} onClick={()=>addToCart(p)} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
-                    <div className="h-20 rounded-xl bg-emerald-50 mb-2" />
+                    <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2" />
                     <div className="font-medium leading-tight">{p.name}</div>
                     <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
                     <div className="font-semibold mt-1">{IDR(p.price)}</div>
@@ -548,11 +685,12 @@ img{display:block;margin:0 auto 6px;height:42px}
                 </div>
               </div>
             </div>
-          </div>
+          </section>
         )}
 
+        {/* HISTORY */}
         {tab==="history" && (
-          <div className="bg-white rounded-2xl border p-3">
+          <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Riwayat Transaksi</h2>
               <div className="flex gap-2">
@@ -579,11 +717,12 @@ img{display:block;margin:0 auto 6px;height:42px}
               </table>
               {historyRows.length===0 && <div className="text-sm text-neutral-500">Belum ada transaksi.</div>}
             </div>
-          </div>
+          </section>
         )}
 
+        {/* PRODUCTS */}
         {tab==="products" && isOwner && (
-          <div className="bg-white rounded-2xl border p-3">
+          <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Manajemen Produk</h2>
               <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
@@ -607,11 +746,12 @@ img{display:block;margin:0 auto 6px;height:42px}
               </table>
               {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
             </div>
-          </div>
+          </section>
         )}
 
+        {/* INVENTORY */}
         {tab==="inventory" && isOwner && (
-          <div className="bg-white rounded-2xl border p-3">
+          <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Inventori</h2>
               <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertIngredient({ name:"Bahan Baru", unit:"pcs", stock:0, min:0 })}>+ Tambah</button>
@@ -631,9 +771,9 @@ img{display:block;margin:0 auto 6px;height:42px}
               </table>
               {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
             </div>
-          </div>
+          </section>
         )}
-      </div>
+      </main>
 
       {/* Modal QR */}
       {showQR && (
@@ -644,6 +784,16 @@ img{display:block;margin:0 auto 6px;height:42px}
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ===== Small UI helpers ===== */
+function KPI({title, value}:{title:string; value:string}) {
+  return (
+    <div className="bg-white border rounded-2xl p-4">
+      <div className="text-[12px] text-neutral-500">{title}</div>
+      <div className="text-xl font-bold mt-1">{value}</div>
     </div>
   );
 }
