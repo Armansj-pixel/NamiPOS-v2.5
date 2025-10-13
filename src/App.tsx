@@ -215,7 +215,7 @@ export default function App() {
   async function closeShiftAction(){
     if(!activeShift?.id) return;
     try{
-      // rekap singkat untuk pesan (opsional)
+      // rekap singkat
       const qSales = query(collection(db,"sales"),
         where("outlet","==",OUTLET),
         where("shiftId","==",activeShift.id)
@@ -526,6 +526,15 @@ img{display:block;margin:0 auto 6px;height:42px}
       setNewIng({ name:"", unit:"pcs", stock:0, min:0 });
     }catch(e:any){
       alert("Tambah inventori gagal: " + (e?.message||e));
+    }
+  }
+  async function deleteIngredientHard(id: string) {
+    try {
+      if (!isOwner) return alert("Akses khusus owner.");
+      if (!confirm("Hapus PERMANEN bahan ini?")) return;
+      await deleteDoc(doc(db, "ingredients", id));
+    } catch (e: any) {
+      alert("Hapus bahan gagal: " + (e?.message || e));
     }
   }
 
@@ -907,7 +916,15 @@ img{display:block;margin:0 auto 6px;height:42px}
             {/* Tabel bahan */}
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Min</th></tr></thead>
+                <thead>
+                  <tr className="text-left border-b">
+                    <th>Nama</th>
+                    <th>Satuan</th>
+                    <th className="text-right">Stok</th>
+                    <th className="text-right">Min</th>
+                    <th className="text-right">Aksi</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {ingredients.map(i=>(
                     <tr key={i.id} className="border-b">
@@ -915,6 +932,14 @@ img{display:block;margin:0 auto 6px;height:42px}
                       <td>{i.unit}</td>
                       <td className="text-right">{i.stock}</td>
                       <td className="text-right">{i.min ?? 0}</td>
+                      <td className="text-right">
+                        <button
+                          onClick={() => deleteIngredientHard(i.id)}
+                          className="px-2 py-1 border rounded text-rose-600"
+                        >
+                          Hapus
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
