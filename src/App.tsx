@@ -1,10 +1,11 @@
-// src/App.tsx — NamiPOS V2.4.3 (Kasir + Public Order + Orders Inbox)
-import React, { useState, useEffect } from "react";
+// src/App.tsx — NamiPOS V2.4.4 (UI Rapi + Kasir + Orders + Public Order + Shift + Dashboard)
+import React, { useEffect, useMemo, useState } from "react";
 import {
   getAuth,
   signInWithEmailAndPassword,
   signOut,
   onAuthStateChanged,
+  User,
 } from "firebase/auth";
 import {
   collection,
@@ -16,13 +17,15 @@ import {
   updateDoc,
   doc,
   serverTimestamp,
+  onSnapshot,
 } from "firebase/firestore";
 import app from "./lib/firebase";
 
+// Firebase instances
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-// util kecil untuk ambil nilai input/textarea aman utk TS
+// Safe getter for input/textarea value (to avoid TS HTMLElement .value errors)
 function getFieldValue(id: string): string {
   const el = document.getElementById(id) as
     | HTMLInputElement
@@ -31,21 +34,58 @@ function getFieldValue(id: string): string {
   return (el?.value ?? "").trim();
 }
 
+// Currency helper
+const IDR = (n: number) =>
+  new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  }).format(n || 0);
+
+type Page = "login" | "dashboard" | "kasir" | "orders" | "public";
+
+type Product = {
+  id: string;
+  name: string;
+  price: number;
+  category?: string;
+  active?: boolean;
+};
+
+type CartItem = {
+  id: string;
+  name: string;
+  price: number;
+  qty: number;
+};
+
+type ShiftLite = {
+  id: string;
+  user: string;
+} | null;
+
 export default function App() {
-  const [user, setUser] = useState<any>(null);
-  const [page, setPage] = useState<"login" | "dashboard" | "kasir" | "orders" | "public">("login");
+  // Auth
+  const [user, setUser] = useState<User | null>(null);
+  const [page, setPage] = useState<Page>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  // kasir
-  const [cart, setCart] = useState<any[]>([]);
-  const [products, setProducts] = useState<any[]>([]);
-  const [subtotal, setSubtotal] = useState(0);
-  const [shift, setShift] = useState<{ id: string; user: string } | null>(null);
+  // Kasir
+  const [products, setProducts] = useState<Product[]>([]);
+  const [queryText, setQueryText] = useState("");
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const subtotal = useMemo(
+    () => cart.reduce((s, i) => s + (Number(i.price) || 0) * (Number(i.qty) || 0), 0),
+    [cart]
+  );
+  const [shift, setShift] = useState<ShiftLite>(null);
 
-  // orders
+  // Orders Inbox
   const [orders, setOrders] = useState<any[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
 
+  // Mount: auth watch
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
@@ -54,10 +94,30 @@ export default function App() {
     return () => unsub();
   }, []);
 
-  // --- LOGIN ---
+  // Load products (live)
+  useEffect(() => {
+    if (!user) return;
+    const qProd = query(collection(db, "products"));
+    const unsub = onSnapshot(qProd, (snap) => {
+      const rows = snap.docs.map((d) => ({
+        id: d.id,
+        ...(d.data() as any),
+      })) as Product[];
+      setProducts(rows.filter((p) => p.active !== false));
+    });
+    return () => unsub();
+  }, [user]);
+
+  // Filtered products
+  const filteredProducts = useMemo(() => {
+    const q = queryText.toLowerCase();
+    return products.filter((p) => p.name?.toLowerCase().includes(q));
+  }, [products, queryText]);
+
+  // --- AUTH ---
   const handleLogin = async () => {
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      await signInWithEmailAndPassword(auth, email.trim(), password);
     } catch (err: any) {
       alert("Login gagal: " + (err?.message || err));
     }
@@ -69,39 +129,9 @@ export default function App() {
     setPage("login");
   };
 
-  // --- KASIR ---
-  const loadProducts = async () => {
-    const snap = await getDocs(collection(db, "products"));
-    setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-  };
-
-  useEffect(() => {
-    if (user) loadProducts();
-  }, [user]);
-
-  const addToCart = (p: any) => setCart((prev) => [...prev, { ...p, qty: 1 }]);
-
-  useEffect(() => {
-    setSubtotal(cart.reduce((sum, i) => sum + (i.price || 0) * (i.qty || 1), 0));
-  }, [cart]);
-
-  const handleSaveSale = async () => {
-    try {
-      const saleRef = await addDoc(collection(db, "sales"), {
-        items: cart,
-        total: subtotal,
-        cashier: user.email,
-        time: serverTimestamp(),
-      });
-      alert("Transaksi tersimpan #" + saleRef.id);
-      setCart([]);
-    } catch (err: any) {
-      alert("Gagal simpan transaksi: " + (err?.message || err));
-    }
-  };
-
   // --- SHIFT ---
   const openShift = async () => {
+    if (!user?.email) return alert("Belum login");
     const ref = await addDoc(collection(db, "shifts"), {
       user: user.email,
       openAt: serverTimestamp(),
@@ -120,10 +150,60 @@ export default function App() {
     alert("Shift ditutup");
   };
 
+  // --- KASIR handlers ---
+  const addToCart = (p: Product) => {
+    setCart((prev) => {
+      const idx = prev.findIndex((i) => i.id === p.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
+        return next;
+      }
+      return [...prev, { id: p.id, name: p.name, price: p.price, qty: 1 }];
+    });
+  };
+  const incQty = (id: string) =>
+    setCart((prev) =>
+      prev.map((i) => (i.id === id ? { ...i, qty: i.qty + 1 } : i))
+    );
+  const decQty = (id: string) =>
+    setCart((prev) =>
+      prev.map((i) =>
+        i.id === id ? { ...i, qty: Math.max(1, i.qty - 1) } : i
+      )
+    );
+  const rmItem = (id: string) =>
+    setCart((prev) => prev.filter((i) => i.id !== id));
+  const clearCart = () => setCart([]);
+
+  const handleSaveSale = async () => {
+    if (!user?.email) return alert("Belum login");
+    if (!cart.length) return alert("Keranjang kosong");
+    try {
+      const ref = await addDoc(collection(db, "sales"), {
+        items: cart,
+        total: subtotal,
+        cashier: user.email,
+        time: serverTimestamp(),
+      });
+      alert("Transaksi tersimpan #" + ref.id);
+      setCart([]);
+    } catch (err: any) {
+      alert("Gagal simpan transaksi: " + (err?.message || err));
+    }
+  };
+
   // --- ORDERS INBOX ---
   const loadOrders = async () => {
-    const snap = await getDocs(query(collection(db, "orders"), orderBy("time", "desc")));
-    setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    setOrdersLoading(true);
+    try {
+      const snap = await getDocs(
+        query(collection(db, "orders"), orderBy("time", "desc"))
+      );
+      setOrders(snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })));
+    } finally {
+      setOrdersLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -141,149 +221,370 @@ export default function App() {
     alert("Pesanan berhasil dikirim!");
   };
 
-  // --- UI SHARED ---
-  const Nav = () => (
-    <div className="flex flex-wrap gap-2 p-2 border-b">
-      <button onClick={() => setPage("dashboard")}>Dashboard</button>
-      <button onClick={() => setPage("kasir")}>Kasir</button>
-      <button onClick={() => setPage("orders")}>Orders</button>
-      <button onClick={() => setPage("public")}>Order Publik</button>
-      <button onClick={handleLogout} className="text-red-600">Keluar</button>
+  // ========== UI COMPONENTS ==========
+  const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+    <div className="min-h-screen bg-neutral-50">
+      <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b">
+        <div className="max-w-7xl mx-auto px-3 md:px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img
+              src="/logo-pos.png"
+              alt="NamiPOS"
+              className="h-7"
+              onError={(e: any) => (e.currentTarget.style.display = "none")}
+            />
+            <div>
+              <div className="font-bold">NamiPOS — MTHaryono</div>
+              <div className="text-[11px] text-neutral-500">
+                Masuk: {user?.email || "-"}
+              </div>
+            </div>
+          </div>
+          <nav className="flex gap-2">
+            {(["dashboard", "kasir", "orders", "public"] as Page[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setPage(t)}
+                className={`px-3 py-1.5 rounded-lg border ${
+                  page === t ? "bg-emerald-50 border-emerald-300" : "bg-white"
+                }`}
+              >
+                {t === "dashboard"
+                  ? "Dashboard"
+                  : t === "kasir"
+                  ? "Kasir"
+                  : t === "orders"
+                  ? "Orders"
+                  : "Order Publik"}
+              </button>
+            ))}
+            <button
+              onClick={handleLogout}
+              className="px-3 py-1.5 rounded-lg border bg-rose-50 text-rose-700"
+            >
+              Keluar
+            </button>
+          </nav>
+        </div>
+      </header>
+      <main className="max-w-7xl mx-auto px-3 md:px-6 py-4">{children}</main>
     </div>
   );
 
-  // --- PAGES ---
+  // ========== PAGES ==========
+  // LOGIN
   if (page === "login") {
     return (
-      <div className="p-4 max-w-sm mx-auto">
-        <h1 className="text-2xl font-bold mb-2 text-center">NamiPOS — Login</h1>
-        <input
-          placeholder="Email"
-          className="border p-2 w-full mb-2"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-        />
-        <input
-          type="password"
-          placeholder="Password"
-          className="border p-2 w-full mb-4"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-        />
-        <button onClick={handleLogin} className="bg-green-600 text-white w-full py-2 rounded">
-          Masuk
-        </button>
+      <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-sm bg-white border rounded-2xl shadow-sm p-6">
+          <div className="flex items-center gap-3 mb-4 justify-center">
+            <img
+              src="/logo-pos.png"
+              alt="NamiPOS"
+              className="h-9"
+              onError={(e: any) => (e.currentTarget.style.display = "none")}
+            />
+            <h1 className="text-xl font-bold">NamiPOS</h1>
+          </div>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleLogin();
+            }}
+            className="space-y-3"
+          >
+            <input
+              className="w-full border rounded-lg p-3"
+              placeholder="Email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+            <input
+              className="w-full border rounded-lg p-3"
+              type="password"
+              placeholder="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+            <button className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg p-3">
+              Masuk
+            </button>
+          </form>
+          <p className="text-xs text-neutral-500 mt-3 text-center">
+            Masuk untuk mengelola POS
+          </p>
+        </div>
       </div>
     );
   }
 
+  // DASHBOARD
   if (page === "dashboard") {
     return (
-      <div className="p-4">
-        <Nav />
-        <h2 className="font-bold text-xl mb-2">Dashboard</h2>
-        <p>Selamat datang, {user?.email}</p>
-      </div>
+      <Shell>
+        <section className="bg-white rounded-2xl shadow-sm border p-4">
+          <h2 className="font-bold text-lg mb-2">Dashboard</h2>
+          <p className="text-sm text-neutral-600">
+            Selamat datang, <b>{user?.email}</b>
+          </p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+            <KPI title="Produk Aktif" value={String(products.length)} />
+            <KPI title="Keranjang Saat Ini" value={String(cart.length)} />
+            <KPI title="Subtotal Keranjang" value={IDR(subtotal)} />
+            <KPI title="Status Shift" value={shift ? "OPEN" : "CLOSED"} />
+          </div>
+        </section>
+      </Shell>
     );
   }
 
+  // KASIR
   if (page === "kasir") {
     return (
-      <div className="p-4">
-        <Nav />
-        <h2 className="font-bold text-xl mb-3">Kasir</h2>
-        <button
-          onClick={shift ? closeShift : openShift}
-          className={`px-3 py-1 rounded ${shift ? "bg-red-500" : "bg-green-500"} text-white`}
-        >
-          {shift ? "Tutup Shift" : "Buka Shift"}
-        </button>
-
-        <div className="grid grid-cols-2 gap-2 my-4">
-          {products.map((p) => (
+      <Shell>
+        <section className="bg-white rounded-2xl shadow-sm border p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-bold text-lg">Kasir</h2>
             <button
-              key={p.id}
-              onClick={() => addToCart(p)}
-              className="border p-2 rounded text-left"
+              onClick={shift ? closeShift : openShift}
+              className={`px-3 py-2 rounded-lg ${
+                shift ? "bg-rose-600" : "bg-emerald-600"
+              } text-white`}
             >
-              <div className="font-semibold">{p.name}</div>
-              <div>Rp {Number(p.price || 0).toLocaleString()}</div>
+              {shift ? "Tutup Shift" : "Buka Shift"}
             </button>
-          ))}
-        </div>
-
-        <h3 className="font-semibold mt-4">Keranjang</h3>
-        {cart.map((i, idx) => (
-          <div key={idx} className="flex justify-between border-b py-1">
-            <span>{i.name}</span>
-            <span>Rp {Number(i.price || 0).toLocaleString()}</span>
           </div>
-        ))}
 
-        <div className="mt-3 font-bold">Total: Rp {subtotal.toLocaleString()}</div>
-        <button onClick={handleSaveSale} className="bg-green-600 text-white px-3 py-2 mt-3 rounded">
-          Simpan & Cetak
-        </button>
-      </div>
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+            {/* Produk */}
+            <div className="md:col-span-7">
+              <div className="mb-3">
+                <input
+                  className="w-full border rounded-lg px-3 py-2"
+                  placeholder="Cari menu…"
+                  value={queryText}
+                  onChange={(e) => setQueryText(e.target.value)}
+                />
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                {filteredProducts.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => addToCart(p)}
+                    className="text-left rounded-2xl border bg-white p-3 hover:shadow"
+                  >
+                    <div className="h-20 w-full rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2" />
+                    <div className="font-medium leading-tight">{p.name}</div>
+                    <div className="mt-1 font-semibold">
+                      {IDR(Number(p.price || 0))}
+                    </div>
+                  </button>
+                ))}
+                {filteredProducts.length === 0 && (
+                  <div className="text-sm text-neutral-500">
+                    Produk tidak ditemukan.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Keranjang */}
+            <div className="md:col-span-5">
+              <div className="rounded-2xl border p-3">
+                <h3 className="font-semibold mb-2">Keranjang</h3>
+                {cart.length === 0 ? (
+                  <div className="text-sm text-neutral-500">
+                    Belum ada item.
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      {cart.map((i) => (
+                        <div
+                          key={i.id}
+                          className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2"
+                        >
+                          <div className="col-span-6">
+                            <div className="font-medium leading-tight">
+                              {i.name}
+                            </div>
+                            <div className="text-xs text-neutral-500">
+                              {IDR(i.price)}
+                            </div>
+                          </div>
+                          <div className="col-span-4 flex items-center justify-end gap-2">
+                            <button
+                              className="px-2 py-1 border rounded"
+                              onClick={() => decQty(i.id)}
+                            >
+                              -
+                            </button>
+                            <div className="w-8 text-center font-medium">
+                              {i.qty}
+                            </div>
+                            <button
+                              className="px-2 py-1 border rounded"
+                              onClick={() => incQty(i.id)}
+                            >
+                              +
+                            </button>
+                          </div>
+                          <div className="col-span-2 flex justify-end">
+                            <button
+                              className="px-2 py-1 rounded border"
+                              onClick={() => rmItem(i.id)}
+                            >
+                              x
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="border-t mt-3 pt-3 flex items-center justify-between text-lg font-semibold">
+                      <span>Total</span>
+                      <span>{IDR(subtotal)}</span>
+                    </div>
+                    <div className="mt-3 flex gap-2 justify-end">
+                      <button
+                        className="px-3 py-2 rounded-lg border"
+                        onClick={clearCart}
+                      >
+                        Bersihkan
+                      </button>
+                      <button
+                        onClick={handleSaveSale}
+                        className="px-3 py-2 rounded-lg bg-emerald-600 text-white"
+                      >
+                        Simpan & Cetak
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      </Shell>
     );
   }
 
+  // ORDERS INBOX
   if (page === "orders") {
     return (
-      <div className="p-4">
-        <Nav />
-        <h2 className="text-xl font-bold mb-2">Daftar Order Masuk</h2>
-        {orders.map((o) => (
-          <div key={o.id} className="border p-2 mb-2 rounded">
-            <p className="font-semibold">
-              {o.name} ({o.phone})
-            </p>
-            <p>Status: {o.status}</p>
-            <ul className="list-disc ml-4">
-              {o.items?.map((it: any, i: number) => (
-                <li key={i}>
-                  {it.name} x{it.qty}
-                </li>
-              ))}
-            </ul>
+      <Shell>
+        <section className="bg-white rounded-2xl shadow-sm border p-4">
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="text-lg font-bold">Daftar Order Masuk</h2>
+            <button
+              onClick={loadOrders}
+              className="px-3 py-2 rounded-lg border"
+              disabled={ordersLoading}
+            >
+              {ordersLoading ? "Memuat…" : "Muat Ulang"}
+            </button>
           </div>
-        ))}
-      </div>
+
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+            {orders.map((o) => (
+              <div key={o.id} className="border rounded-2xl p-3">
+                <div className="font-semibold">
+                  {o.name} ({o.phone})
+                </div>
+                <div className="text-xs text-neutral-500 mb-2">
+                  Status: {o.status}
+                </div>
+                <ul className="text-sm list-disc ml-4">
+                  {o.items?.map((it: any, i: number) => (
+                    <li key={i}>
+                      {it.name} x{it.qty}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+            {orders.length === 0 && !ordersLoading && (
+              <div className="text-sm text-neutral-500">Belum ada pesanan.</div>
+            )}
+          </div>
+        </section>
+      </Shell>
     );
   }
 
+  // PUBLIC ORDER
   if (page === "public") {
     return (
-      <div className="p-4 max-w-sm mx-auto">
-        <h2 className="font-bold text-xl mb-2 text-center">Order Online</h2>
-        <input id="field_name" className="border p-2 w-full mb-2" placeholder="Nama" />
-        <input id="field_phone" className="border p-2 w-full mb-2" placeholder="No HP" />
-        <textarea
-          id="field_items"
-          className="border p-2 w-full mb-2"
-          placeholder="Pesanan (pisahkan koma, contoh: Matcha, Red Velvet, Brown Sugar)"
-        />
-        <button
-          onClick={() => {
-            const name = getFieldValue("field_name");
-            const phone = getFieldValue("field_phone");
-            const itemsText = getFieldValue("field_items");
-            const items = itemsText
-              ? itemsText.split(",").map((t) => ({ name: t.trim(), qty: 1 }))
-              : [];
-            if (!name || !phone || items.length === 0) {
-              alert("Nama, No HP, dan daftar pesanan wajib diisi.");
-              return;
-            }
-            createPublicOrder(name, phone, items);
-          }}
-          className="bg-green-600 text-white w-full py-2 rounded"
-        >
-          Kirim Pesanan
-        </button>
-      </div>
+      <Shell>
+        <section className="max-w-lg mx-auto bg-white rounded-2xl shadow-sm border p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <img
+              src="/logo-pos.png"
+              className="h-7"
+              onError={(e: any) => (e.currentTarget.style.display = "none")}
+            />
+            <div className="font-semibold">Order Online — MTHaryono</div>
+          </div>
+
+          <div className="space-y-2">
+            <input
+              id="field_name"
+              className="border rounded-lg px-3 py-2 w-full"
+              placeholder="Nama"
+            />
+            <input
+              id="field_phone"
+              className="border rounded-lg px-3 py-2 w-full"
+              placeholder="No HP"
+            />
+            <textarea
+              id="field_items"
+              className="border rounded-lg px-3 py-2 w-full"
+              placeholder="Pesanan (pisahkan koma, contoh: Matcha, Red Velvet, Brown Sugar)"
+            />
+          </div>
+
+          <button
+            onClick={() => {
+              const name = getFieldValue("field_name");
+              const phone = getFieldValue("field_phone");
+              const itemsText = getFieldValue("field_items");
+              const items = itemsText
+                ? itemsText.split(",").map((t) => ({ name: t.trim(), qty: 1 }))
+                : [];
+              if (!name || !phone || items.length === 0) {
+                alert("Nama, No HP, dan daftar pesanan wajib diisi.");
+                return;
+              }
+              createPublicOrder(name, phone, items);
+              // optional: reset
+              const ids = ["field_name", "field_phone", "field_items"];
+              ids.forEach((id) => {
+                const el = document.getElementById(id) as
+                  | HTMLInputElement
+                  | HTMLTextAreaElement
+                  | null;
+                if (el) el.value = "";
+              });
+            }}
+            className="mt-3 bg-emerald-600 text-white w-full py-2 rounded-lg"
+          >
+            Kirim Pesanan
+          </button>
+        </section>
+      </Shell>
     );
   }
 
   return null;
+}
+
+// Small KPI card
+function KPI({ title, value }: { title: string; value: string }) {
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border p-4">
+      <div className="text-[12px] text-neutral-500">{title}</div>
+      <div className="text-xl font-bold mt-1">{value}</div>
+    </div>
+  );
 }
