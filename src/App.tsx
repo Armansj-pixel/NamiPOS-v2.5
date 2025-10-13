@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query,
-  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter,
-  deleteDoc, startAt, endAt, writeBatch, increment
+  addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot,
+  orderBy, query, serverTimestamp, setDoc, startAfter, Timestamp,
+  updateDoc, where, writeBatch
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
@@ -15,7 +15,7 @@ const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const QRIS_IMG_SRC = "/qris.png"; // /public/qris.png
+const QRIS_IMG_SRC = "/qris.png"; // simpan /public/qris.png
 
 /* ==========================
    TYPES
@@ -37,8 +37,8 @@ type Sale = {
   payMethod: "cash" | "ewallet" | "qris";
   cash?: number; change?: number;
 };
-type RecipeItem = { ingredientId: string; qty: number };
-type Recipe = { id: string; outlet: string; productId: string; items: RecipeItem[] };
+// === Resep ===
+type RecipeItem = { ingredientId: string; qty: number; unit: string };
 
 /* ==========================
    UTIL
@@ -58,7 +58,7 @@ export default function App() {
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory"|"settings">("pos");
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory"|"recipes">("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
@@ -67,7 +67,11 @@ export default function App() {
   /* ---- master ---- */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
+
+  /* ---- recipes ---- */
+  const [recipeMap, setRecipeMap] = useState<Record<string, RecipeItem[]>>({});
+  const [recipeTabProdId, setRecipeTabProdId] = useState<string>("");
+  const [recipeDraft, setRecipeDraft] = useState<RecipeItem[]>([]);
 
   /* ---- POS ---- */
   const [queryText, setQueryText] = useState("");
@@ -99,19 +103,6 @@ export default function App() {
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
-  /* ---- products form/edit ---- */
-  const [newProd, setNewProd] = useState({ name: "", category: "Signature", price: 10000, active: true });
-  const [editProd, setEditProd] = useState<Product | null>(null);
-
-  /* ---- inventory form & inline edit ---- */
-  const [newIng, setNewIng] = useState({ name: "", unit: "pcs", stock: 0, min: 0 });
-  const [editIngId, setEditIngId] = useState<string|null>(null);
-  const [editIngDraft, setEditIngDraft] = useState<{name:string; unit:string; stock:number; min:number}>({name:"", unit:"pcs", stock:0, min:0});
-
-  /* ---- recipe editor ---- */
-  const [recipeEditFor, setRecipeEditFor] = useState<string|null>(null); // productId
-  const [recipeDraft, setRecipeDraft] = useState<RecipeItem[]>([]);
-
   /* ---- computed ---- */
   const filteredProducts = useMemo(
     () => products.filter(p => (p.active!==false) && p.name.toLowerCase().includes(queryText.toLowerCase())),
@@ -122,35 +113,6 @@ export default function App() {
   const svcVal = Math.round(subtotal * (svcPct/100));
   const total = Math.max(0, subtotal + taxVal + svcVal - (discount||0));
   const change = Math.max(0, (cash||0) - total);
-
-  const lowIngredients = useMemo(()=>{
-    return ingredients.filter(i => i.stock <= (i.min ?? 0));
-  }, [ingredients]);
-
-  // kebutuhan bahan utk keranjang saat ini
-  const requiredMap = useMemo(()=>{
-    const need = new Map<string, number>(); // ingredientId -> totalNeeded
-    for(const ci of cart){
-      const rec = recipes.find(r => r.productId === ci.productId);
-      if(!rec) continue;
-      for(const it of rec.items || []){
-        need.set(it.ingredientId, (need.get(it.ingredientId) || 0) + (it.qty * ci.qty));
-      }
-    }
-    return need;
-  }, [cart, recipes]);
-
-  const insufficientList = useMemo(()=>{
-    const list: {name:string; needed:number; available:number; unit:string}[] = [];
-    requiredMap.forEach((needed, ingId)=>{
-      const ing = ingredients.find(i => i.id === ingId);
-      if(!ing) return;
-      if(ing.stock < needed){
-        list.push({ name: ing.name, needed, available: ing.stock, unit: ing.unit });
-      }
-    });
-    return list;
-  }, [requiredMap, ingredients]);
 
   /* ==========================
      AUTH WATCH
@@ -191,11 +153,14 @@ export default function App() {
     // recipes
     const qRec = query(collection(db,"recipes"), where("outlet","==",OUTLET));
     const unsubRec = onSnapshot(qRec, snap=>{
-      const rows: Recipe[] = snap.docs.map(d=>{
+      const next: Record<string, RecipeItem[]> = {};
+      snap.docs.forEach(d=>{
         const x = d.data() as any;
-        return { id:d.id, outlet:x.outlet, productId:x.productId, items: (x.items||[]).map((it:any)=>({ingredientId:it.ingredientId, qty:Number(it.qty)||0})) };
+        next[x.productId || d.id] = (x.items||[]).map((r:any)=>({
+          ingredientId: r.ingredientId, qty: Number(r.qty)||0, unit: r.unit||""
+        }));
       });
-      setRecipes(rows);
+      setRecipeMap(next);
     }, err=>alert("Memuat resep gagal.\n"+(err.message||err)));
 
     // shift
@@ -244,8 +209,18 @@ export default function App() {
         openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
       });
     }catch(e:any){
-      const msg = e?.message||String(e);
-      alert("Gagal cek shift aktif.\n"+msg);
+      const msg = String(e?.message||e);
+      if (msg.includes("index")) {
+        alert(
+`Gagal cek shift aktif.
+Kemungkinan perlu Firestore index untuk koleksi 'shifts':
+outlet(ASC), isOpen(ASC), openAt(DESC)
+
+/* Buat index di Firestore console (Composite Index). */`
+        );
+      } else {
+        alert("Gagal cek shift aktif.");
+      }
     }
   }
 
@@ -260,24 +235,47 @@ export default function App() {
     await checkActiveShift();
   }
 
+  // rekap & tutup
   async function closeShiftAction(){
     if(!activeShift?.id) return;
     try{
-      // rekap singkat
-      const qSales = query(collection(db,"sales"),
+      // ambil semua sales shift ini
+      const qSales = query(
+        collection(db,"sales"),
         where("outlet","==",OUTLET),
         where("shiftId","==",activeShift.id)
       );
       const s = await getDocs(qSales);
-      let total=0, trx=0;
-      s.docs.forEach(d=>{ const x=d.data() as any; total+=x.total||0; trx++; });
-
-      await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp(), total, trx });
+      let trx=0, omzet=0, cashSum=0, ew=0, qr=0;
+      s.forEach(d=>{
+        const x = d.data() as any;
+        trx += 1; omzet += x.total||0;
+        if(x.payMethod==="cash") cashSum += x.total||0;
+        if(x.payMethod==="ewallet") ew += x.total||0;
+        if(x.payMethod==="qris") qr += x.total||0;
+      });
+      await updateDoc(doc(db,"shifts", activeShift.id), {
+        isOpen:false, closeAt: serverTimestamp(),
+        recap: { trx, omzet, cash:cashSum, ewallet:ew, qris:qr }
+      });
       setActiveShift(null);
-      alert(`Shift ditutup.\nTransaksi: ${trx}\nTotal: ${IDR(total)}`);
+      alert(`Shift ditutup.\nTrx: ${trx}\nOmzet: ${IDR(omzet)}`);
       loadDashboard().catch(()=>{});
     }catch(e:any){
-      alert("Tutup shift gagal.\n"+(e?.message||e));
+      const msg = String(e?.message||e);
+      if (msg.includes("index")) {
+        alert(
+`Tutup shift gagal.
+The query requires an index.
+Buat index Composite untuk koleksi 'sales':
+- outlet (ASC)
+- shiftId (ASC)
+
+Setelah index siap, coba lagi.`
+        );
+      } else {
+        alert("Tutup shift gagal.\n"+msg);
+      }
     }
   }
 
@@ -294,7 +292,11 @@ export default function App() {
   const inc = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:ci.qty+1 } : ci));
   const dec = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:Math.max(1, ci.qty-1) } : ci));
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
-  const clearCart = ()=> { setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput(""); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); };
+  const clearCart = ()=> {
+    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0);
+    setPayMethod("cash"); setCash(0); setNoteInput("");
+    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
+  };
 
   /* loyalty: auto lookup by phone */
   useEffect(()=>{
@@ -309,7 +311,7 @@ export default function App() {
           const c = s.data() as any;
           setCustomerName(c.name||""); setCustomerPoints(c.points||0);
         }else{
-          setCustomerPoints(0);
+          setCustomerPoints(0); // pelanggan baru
         }
       }catch(e:any){ console.warn("Lookup customer:", e?.message||e); }
     })();
@@ -355,20 +357,30 @@ img{display:block;margin:0 auto 6px;height:42px}
     w.document.write(html); w.document.close();
   }
 
-  /* finalize: cek stok → simpan sale → kurangi stok → loyalty → cetak */
+  /* finalize */
   async function finalize(){
     if(!user?.email) return alert("Belum login.");
     if(!activeShift?.id) return alert("Buka shift dahulu.");
     if(cart.length===0) return alert("Keranjang kosong.");
     if(payMethod==="cash" && cash<total) return alert("Uang tunai kurang.");
 
-    // 1) Validasi stok cukup berdasar resep
-    if(insufficientList.length>0){
-      const msg = "Stok bahan kurang:\n" + insufficientList.map(x=>`- ${x.name}: butuh ${x.needed} ${x.unit}, tersedia ${x.available} ${x.unit}`).join("\n");
-      return alert(msg);
-    }
+    // Warning stok menipis (info, tidak memblok)
+    try {
+      const low: string[] = [];
+      for (const ci of cart) {
+        const rec = recipeMap[ci.productId] || [];
+        for (const r of rec) {
+          const ing = ingredients.find(i => i.id === r.ingredientId);
+          if (!ing) continue;
+          const needed = (r.qty || 0) * ci.qty;
+          if ((ing.stock || 0) - needed <= (ing.min || 0)) {
+            low.push(`${ing.name} (sisa ~${(ing.stock||0)-needed})`);
+          }
+        }
+      }
+      if (low.length) alert("Perhatian, stok menipis:\n- " + low.join("\n- "));
+    } catch {}
 
-    // 2) Siapkan payload sale
     const payload: Omit<Sale,"id"> = {
       outlet: OUTLET, shiftId: activeShift.id, cashierEmail: user.email,
       customerPhone: customerPhone?.trim()||null, customerName: customerName?.trim()||null,
@@ -379,26 +391,23 @@ img{display:block;margin:0 auto 6px;height:42px}
     };
 
     try{
-      // 3) Simpan sale
-      const saleRef = await addDoc(collection(db,"sales"), payload as any);
+      // Simpan sale
+      const ref = await addDoc(collection(db,"sales"), payload as any);
 
-      // 4) Kurangi stok (atomic dengan increment)
-      // hitung kebutuhan per ingredient
-      const perIng = new Map<string, number>();
+      // Kurangi stok sesuai resep (batch)
+      const b = writeBatch(db);
       for(const ci of cart){
-        const rec = recipes.find(r => r.productId === ci.productId);
-        if(!rec) continue;
-        for(const it of rec.items){
-          perIng.set(it.ingredientId, (perIng.get(it.ingredientId)||0) + it.qty * ci.qty);
+        const rec = recipeMap[ci.productId] || [];
+        for(const r of rec){
+          const ing = ingredients.find(i=>i.id===r.ingredientId);
+          if(!ing) continue;
+          const newStock = Math.max(0, (ing.stock||0) - (r.qty||0)*ci.qty);
+          b.update(doc(db,"ingredients", ing.id), { stock: newStock });
         }
       }
-      const batch = writeBatch(db);
-      perIng.forEach((need, ingId)=>{
-        batch.update(doc(db, "ingredients", ingId), { stock: increment(-need) });
-      });
-      await batch.commit();
+      await b.commit();
 
-      // 5) Loyalty poin
+      // loyalty
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
         const s = await getDoc(cref);
@@ -411,8 +420,7 @@ img{display:block;margin:0 auto 6px;height:42px}
         }
       }
 
-      // 6) Cetak & bereskan
-      printReceipt(payload, saleRef.id);
+      printReceipt(payload, ref.id);
       clearCart();
       if(tab==="history") loadHistory(false);
       if(isOwner && tab==="dashboard") loadDashboard().catch(()=>{});
@@ -448,8 +456,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       setHistoryRows(prev=> append? [...prev, ...rows] : rows);
       setHistCursor(snap.docs.length? snap.docs[snap.docs.length-1] : null);
     }catch(e:any){
-      const msg = String(e?.message||"");
-      if(msg.includes("index")){
+      if(String(e?.message||"").includes("index")){
         alert("Riwayat butuh Firestore index.\nBuat index: sales → outlet(ASC), time(DESC)\n\n"+e.message);
       }else{
         alert("Gagal memuat riwayat: "+(e?.message||e));
@@ -523,7 +530,7 @@ img{display:block;margin:0 auto 6px;height:42px}
   }
 
   /* ==========================
-     OWNER: PRODUCTS
+     OWNER: PRODUCTS & INVENTORY
   =========================== */
   async function upsertProduct(p: Partial<Product> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
@@ -533,54 +540,11 @@ img{display:block;margin:0 auto 6px;height:42px}
       category: p.category||"Signature", active: p.active!==false
     }, { merge:true });
   }
-  function resetNewProd(){ setNewProd({ name: "", category: "Signature", price: 10000, active: true }); }
-  function startEditProd(p: Product){ setEditProd({...p}); }
-  function cancelEditProd(){ setEditProd(null); }
-  async function saveEditProd(){
-    try{
-      if(!isOwner || !editProd) return;
-      if(!editProd.name.trim()) return alert("Nama produk wajib diisi.");
-      await upsertProduct({
-        id: editProd.id,
-        name: editProd.name.trim(),
-        category: editProd.category || "Signature",
-        price: Number(editProd.price)||0,
-        active: editProd.active!==false
-      });
-      setEditProd(null);
-    }catch(e:any){ alert("Gagal menyimpan produk: "+(e?.message||e)); }
-  }
-  async function handleAddProduct(){
-    try{
-      if(!isOwner) return;
-      if(!newProd.name.trim()) return alert("Nama produk wajib diisi.");
-      await upsertProduct({
-        name: newProd.name.trim(),
-        category: newProd.category || "Signature",
-        price: Number(newProd.price)||0,
-        active: newProd.active!==false
-      });
-      resetNewProd();
-    }catch(e:any){ alert("Tambah produk gagal: "+(e?.message||e)); }
-  }
-  async function deactivateProductSafe(id:string){
-    try{
-      if(!isOwner) return alert("Akses khusus owner.");
-      if(!confirm("Nonaktifkan produk ini?")) return;
-      await updateDoc(doc(db,"products", id), { active:false });
-    }catch(e:any){ alert("Nonaktifkan produk gagal: "+(e?.message||e)); }
-  }
-  async function deleteProductHard(id:string){
-    try{
-      if(!isOwner) return alert("Akses khusus owner.");
-      if(!confirm("Hapus PERMANEN produk ini?")) return;
-      await deleteDoc(doc(db,"products", id));
-    }catch(e:any){ alert("Hapus produk gagal: "+(e?.message||e)); }
+  async function deactivateProduct(id:string){
+    if(!isOwner) return alert("Akses khusus owner.");
+    await updateDoc(doc(db,"products", id), { active:false });
   }
 
-  /* ==========================
-     OWNER: INVENTORY
-  =========================== */
   async function upsertIngredient(i: Partial<Ingredient> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = i.id || uid();
@@ -589,80 +553,41 @@ img{display:block;margin:0 auto 6px;height:42px}
       stock: Number(i.stock)||0, min: Number(i.min)||0
     }, { merge:true });
   }
-  async function handleAddIngredient(){
-    try{
-      if(!newIng.name.trim()) return alert("Nama bahan wajib diisi.");
-      await upsertIngredient({
-        name: newIng.name.trim(),
-        unit: newIng.unit || "pcs",
-        stock: Number(newIng.stock)||0,
-        min: Number(newIng.min)||0
-      });
-      setNewIng({ name:"", unit:"pcs", stock:0, min:0 });
-    }catch(e:any){
-      alert("Tambah inventori gagal: " + (e?.message||e));
-    }
-  }
-  async function deleteIngredientHard(id: string) {
-    try {
-      if (!isOwner) return alert("Akses khusus owner.");
-      if (!confirm("Hapus PERMANEN bahan ini?")) return;
-      await deleteDoc(doc(db, "ingredients", id));
-    } catch (e: any) {
-      alert("Hapus bahan gagal: " + (e?.message || e));
-    }
-  }
-  function startEditIngredient(i: Ingredient){
-    setEditIngId(i.id);
-    setEditIngDraft({ name:i.name, unit:i.unit, stock:i.stock, min:i.min ?? 0 });
-  }
-  function cancelEditIngredient(){ setEditIngId(null); }
-  async function saveEditIngredient(){
-    if(!editIngId) return;
-    try{
-      const d = editIngDraft;
-      if(!d.name.trim()) return alert("Nama bahan wajib diisi.");
-      await upsertIngredient({ id: editIngId, name:d.name.trim(), unit:d.unit, stock:Number(d.stock)||0, min:Number(d.min)||0 });
-      setEditIngId(null);
-    }catch(e:any){ alert("Simpan bahan gagal: "+(e?.message||e)); }
+  async function deleteIngredient(id:string){
+    if(!isOwner) return alert("Akses khusus owner.");
+    if(!confirm("Hapus bahan ini?")) return;
+    await deleteDoc(doc(db,"ingredients", id));
   }
 
-  /* ==========================
-     OWNER: RECIPES
-  =========================== */
-  function editRecipeFor(productId: string){
-    setRecipeEditFor(productId);
-    const rec = recipes.find(r => r.productId===productId);
-    setRecipeDraft(rec ? rec.items.map(x=>({...x})) : []);
+  // === Resep editor helpers ===
+  function startEditRecipe(productId: string) {
+    setRecipeTabProdId(productId);
+    const existing = recipeMap[productId] || [];
+    setRecipeDraft(existing.length ? existing.map(x=>({...x})) : [{ ingredientId: "", qty: 0, unit: "" }]);
   }
-  function addRecipeLine(){
-    // pilih default ingredient pertama jika ada
-    const first = ingredients[0];
-    if(!first) return alert("Belum ada bahan. Tambahkan bahan dulu.");
-    setRecipeDraft(prev => [...prev, { ingredientId: first.id, qty: 1 }]);
+  function changeRecipeRow(i: number, patch: Partial<RecipeItem>) {
+    setRecipeDraft(prev => prev.map((row, idx) => idx === i ? { ...row, ...patch } : row));
   }
-  function updateRecipeLine(idx:number, field:"ingredientId"|"qty", val:string|number){
-    setRecipeDraft(prev => prev.map((it,i)=> i===idx ? ({...it, [field]: field==="qty" ? Number(val)||0 : String(val)}) : it ));
-  }
-  function deleteRecipeLine(idx:number){
-    setRecipeDraft(prev => prev.filter((_,i)=> i!==idx));
-  }
-  async function saveRecipe(){
-    if(!recipeEditFor) return;
-    try{
-      const clean = recipeDraft.filter(it => it.ingredientId && (Number(it.qty)||0)>0);
-      const existing = recipes.find(r => r.productId===recipeEditFor);
-      const id = existing?.id || `REC-${recipeEditFor}`;
-      await setDoc(doc(db,"recipes", id), {
+  function addRecipeRow() { setRecipeDraft(prev => [...prev, { ingredientId: "", qty: 0, unit: "" }]); }
+  function removeRecipeRow(i: number) { setRecipeDraft(prev => prev.filter((_, idx) => idx !== i)); }
+  async function saveRecipe() {
+    if (!isOwner) return alert("Akses khusus owner.");
+    if (!recipeTabProdId) return alert("Pilih produk.");
+    const cleansed = recipeDraft
+      .filter(r => r.ingredientId && (Number(r.qty) > 0))
+      .map(r => ({ ingredientId: r.ingredientId, qty: Number(r.qty), unit: r.unit || (ingredients.find(i=>i.id===r.ingredientId)?.unit || "") }));
+    if (cleansed.length === 0) return alert("Isi minimal satu bahan dengan qty > 0.");
+    try {
+      await setDoc(doc(db, "recipes", recipeTabProdId), {
         outlet: OUTLET,
-        productId: recipeEditFor,
-        items: clean.map(it => ({ ingredientId: it.ingredientId, qty: Number(it.qty)||0 }))
-      }, { merge:true });
-      setRecipeEditFor(null);
-      setRecipeDraft([]);
+        productId: recipeTabProdId,
+        items: cleansed,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      setRecipeMap(prev => ({ ...prev, [recipeTabProdId]: cleansed }));
       alert("Resep disimpan.");
-    }catch(e:any){
-      alert("Simpan resep gagal: "+(e?.message||e));
+    } catch (e:any) {
+      alert("Gagal menyimpan resep: " + (e?.message || e));
     }
   }
 
@@ -703,26 +628,22 @@ img{display:block;margin:0 auto 6px;height:42px}
               <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
             </div>
           </div>
-          <nav className="flex gap-2">
+          <nav className="flex gap-2 flex-wrap">
             {isOwner && <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Dashboard</button>}
             <button onClick={()=>setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Kasir</button>
             <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
             {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
             {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
-            {isOwner && <button onClick={()=>setTab("settings")} className={`px-3 py-1.5 rounded-lg border ${tab==="settings"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Pengaturan</button>}
+            {isOwner && <button
+              onClick={()=>{ setTab("recipes"); if(!recipeTabProdId && products[0]) startEditRecipe(products[0].id); }}
+              className={`px-3 py-1.5 rounded-lg border ${tab==="recipes"?"bg-emerald-50 border-emerald-200":"bg-white"}`}
+            >Resep</button>}
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-4">
-        {/* Banner stok menipis */}
-        {lowIngredients.length>0 && (
-          <div className="mb-3 p-3 rounded-xl border bg-amber-50 text-amber-900 text-sm">
-            ⚠️ Bahan menipis: {lowIngredients.map(i=>i.name).join(", ")}
-          </div>
-        )}
-
         {/* Shift badge */}
         <div className="mb-3">
           <div className="inline-flex items-center gap-2 text-xs px-3 py-1 rounded-full border bg-white">
@@ -745,6 +666,7 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
+            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -752,6 +674,8 @@ img{display:block;margin:0 auto 6px;height:42px}
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
+
+            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -765,6 +689,7 @@ img{display:block;margin:0 auto 6px;height:42px}
                   </tbody>
                 </table>
               </div>
+
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
@@ -825,12 +750,6 @@ img{display:block;margin:0 auto 6px;height:42px}
                   <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={noteInput} onChange={e=>setNoteInput(e.target.value)} />
                   <button className="px-3 py-2 rounded-lg border" onClick={()=>setNoteInput("")}>Clear</button>
                 </div>
-
-                {insufficientList.length>0 && (
-                  <div className="mb-2 p-2 rounded-lg border bg-rose-50 text-rose-700 text-xs">
-                    Tidak cukup stok untuk: {insufficientList.map(x=>`${x.name} (${x.available}/${x.needed} ${x.unit})`).join(", ")}
-                  </div>
-                )}
 
                 {cart.length===0 ? (
                   <div className="text-sm text-neutral-500">Belum ada item. Klik menu untuk menambahkan.</div>
@@ -949,209 +868,76 @@ img{display:block;margin:0 auto 6px;height:42px}
           </section>
         )}
 
-        {/* PRODUCTS + Recipe Editor */}
+        {/* PRODUCTS */}
         {tab==="products" && isOwner && (
           <section className="bg-white rounded-2xl border p-3">
-            <h2 className="text-lg font-semibold mb-3">Manajemen Produk</h2>
-
-            {/* Form tambah produk */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 mb-3">
-              <input className="md:col-span-4 border rounded-lg px-3 py-2" placeholder="Nama produk" value={newProd.name} onChange={(e)=>setNewProd(v=>({...v, name:e.target.value}))}/>
-              <input className="md:col-span-3 border rounded-lg px-3 py-2" placeholder="Kategori (ex: Signature)" value={newProd.category} onChange={(e)=>setNewProd(v=>({...v, category:e.target.value}))}/>
-              <input type="number" className="md:col-span-3 border rounded-lg px-3 py-2" placeholder="Harga" value={newProd.price} onChange={(e)=>setNewProd(v=>({...v, price:Number(e.target.value)||0}))}/>
-              <div className="md:col-span-2 flex items-center gap-2">
-                <label className="text-sm flex items-center gap-2">
-                  <input type="checkbox" checked={newProd.active} onChange={(e)=>setNewProd(v=>({...v, active:e.target.checked}))}/>
-                  Aktif
-                </label>
-                <button onClick={handleAddProduct} className="ml-auto px-3 py-2 rounded-lg bg-emerald-600 text-white">+ Tambah</button>
-              </div>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold">Manajemen Produk</h2>
+              <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
             </div>
-
-            {/* Tabel produk */}
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b">
-                    <th className="py-2">Nama</th>
-                    <th>Kategori</th>
-                    <th className="text-right">Harga</th>
-                    <th className="text-right">Status</th>
-                    <th className="text-right">Aksi</th>
-                  </tr>
-                </thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr></thead>
                 <tbody>
-                  {products.map(p=>{
-                    const editing = editProd?.id === p.id;
-                    return (
-                      <tr key={p.id} className="border-b align-top">
-                        <td className="py-2">
-                          {editing ? (
-                            <input className="border rounded px-2 py-1 w-full" value={editProd!.name} onChange={(e)=>setEditProd(v=>v?{...v, name:e.target.value}:v)}/>
-                          ) : p.name}
-                        </td>
-                        <td>
-                          {editing ? (
-                            <input className="border rounded px-2 py-1" value={editProd!.category || ""} onChange={(e)=>setEditProd(v=>v?{...v, category:e.target.value}:v)}/>
-                          ) : (p.category || "-")}
-                        </td>
-                        <td className="text-right">
-                          {editing ? (
-                            <input type="number" className="border rounded px-2 py-1 w-28 text-right" value={editProd!.price} onChange={(e)=>setEditProd(v=>v?{...v, price:Number(e.target.value)||0}:v)}/>
-                          ) : IDR(p.price)}
-                        </td>
-                        <td className="text-right">
-                          {editing ? (
-                            <label className="text-sm">
-                              <input type="checkbox" className="mr-2" checked={editProd!.active !== false} onChange={(e)=>setEditProd(v=>v?{...v, active:e.target.checked}:v)}/>
-                              {editProd!.active !== false ? "Aktif" : "Nonaktif"}
-                            </label>
-                          ) : (
-                            <span className={`px-2 py-0.5 rounded text-xs ${p.active!==false?'bg-emerald-50 text-emerald-700':'bg-neutral-100 text-neutral-600'}`}>
-                              {p.active!==false ? "Aktif" : "Nonaktif"}
-                            </span>
-                          )}
-                        </td>
-                        <td className="text-right">
-                          {editing ? (
-                            <div className="flex justify-end gap-2">
-                              <button onClick={saveEditProd} className="px-2 py-1 border rounded bg-emerald-50">Simpan</button>
-                              <button onClick={cancelEditProd} className="px-2 py-1 border rounded">Batal</button>
-                            </div>
-                          ) : (
-                            <div className="flex flex-col items-end gap-2">
-                              <div className="flex gap-2">
-                                <button onClick={()=>startEditProd(p)} className="px-2 py-1 border rounded">Edit</button>
-                                <button onClick={()=>deactivateProductSafe(p.id)} className="px-2 py-1 border rounded">Nonaktifkan</button>
-                                <button onClick={()=>deleteProductHard(p.id)} className="px-2 py-1 border rounded text-rose-600">Hapus</button>
-                              </div>
-                              {/* tombol buka editor resep */}
-                              <button onClick={()=>editRecipeFor(p.id)} className="px-2 py-1 border rounded text-xs">Resep</button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {products.map(p=>(
+                    <tr key={p.id} className="border-b">
+                      <td className="py-2">{p.name}</td>
+                      <td>{p.category||"-"}</td>
+                      <td className="text-right">{IDR(p.price)}</td>
+                      <td className="text-right">
+                        <button className="px-2 py-1 border rounded mr-2" onClick={async ()=>{
+                          const name = prompt("Nama produk:", p.name) ?? p.name;
+                          const cat  = prompt("Kategori:", p.category||"Signature") ?? (p.category||"Signature");
+                          const priceStr = prompt("Harga (angka):", String(p.price)) ?? String(p.price);
+                          const price = Number(priceStr)||p.price;
+                          await upsertProduct({ id:p.id, name, price, category:cat, active:p.active });
+                        }}>Edit</button>
+                        <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
-
-              {recipeEditFor && (
-                <div className="mt-4 p-3 border rounded-xl bg-neutral-50">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="font-semibold">Resep: {products.find(p=>p.id===recipeEditFor)?.name || recipeEditFor}</div>
-                    <div className="flex gap-2">
-                      <button onClick={addRecipeLine} className="px-2 py-1 border rounded">+ Tambah Bahan</button>
-                      <button onClick={saveRecipe} className="px-3 py-1 rounded bg-emerald-600 text-white">Simpan Resep</button>
-                      <button onClick={()=>{ setRecipeEditFor(null); setRecipeDraft([]); }} className="px-2 py-1 border rounded">Tutup</button>
-                    </div>
-                  </div>
-                  <div className="overflow-auto">
-                    <table className="w-full text-sm">
-                      <thead><tr className="text-left border-b"><th className="py-1">Bahan</th><th>Satuan</th><th className="text-right">Qty / item</th><th className="text-right">Aksi</th></tr></thead>
-                      <tbody>
-                        {recipeDraft.length===0 && <tr><td colSpan={4} className="py-2 text-neutral-500">Belum ada bahan pada resep ini.</td></tr>}
-                        {recipeDraft.map((it, idx)=>{
-                          const ing = ingredients.find(i=>i.id===it.ingredientId);
-                          return (
-                            <tr key={idx} className="border-b">
-                              <td className="py-1">
-                                <select className="border rounded px-2 py-1" value={it.ingredientId} onChange={(e)=>updateRecipeLine(idx, "ingredientId", e.target.value)}>
-                                  {ingredients.map(g=> <option key={g.id} value={g.id}>{g.name}</option>)}
-                                </select>
-                              </td>
-                              <td>{ing?.unit || "-"}</td>
-                              <td className="text-right">
-                                <input type="number" className="border rounded px-2 py-1 w-28 text-right" value={it.qty} onChange={(e)=>updateRecipeLine(idx, "qty", Number(e.target.value)||0)}/>
-                              </td>
-                              <td className="text-right">
-                                <button onClick={()=>deleteRecipeLine(idx)} className="px-2 py-1 border rounded text-rose-600">Hapus</button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <div className="text-xs text-neutral-600 mt-2">Catatan: Qty menggunakan satuan bahan terpilih (gr/ml/pcs). Saat transaksi, stok akan dikurangi sesuai qty × jumlah item.</div>
-                </div>
-              )}
-
-              {products.length===0 && <div className="text-sm text-neutral-500 mt-3">Belum ada produk.</div>}
+              {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
             </div>
           </section>
         )}
 
-        {/* INVENTORY (inline edit + hapus) */}
+        {/* INVENTORY */}
         {tab==="inventory" && isOwner && (
           <section className="bg-white rounded-2xl border p-3">
-            <h2 className="text-lg font-semibold mb-3">Inventori</h2>
-
-            {/* Form tambah bahan */}
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 mb-3">
-              <input className="md:col-span-4 border rounded-lg px-3 py-2" placeholder="Nama bahan" value={newIng.name} onChange={(e)=>setNewIng(v=>({...v, name:e.target.value}))}/>
-              <input className="md:col-span-2 border rounded-lg px-3 py-2" placeholder="Satuan (ex: gr / ml / pcs)" value={newIng.unit} onChange={(e)=>setNewIng(v=>({...v, unit:e.target.value}))}/>
-              <input type="number" className="md:col-span-3 border rounded-lg px-3 py-2" placeholder="Stok awal" value={newIng.stock} onChange={(e)=>setNewIng(v=>({...v, stock:Number(e.target.value)||0}))}/>
-              <input type="number" className="md:col-span-2 border rounded-lg px-3 py-2" placeholder="Min. stok" value={newIng.min} onChange={(e)=>setNewIng(v=>({...v, min:Number(e.target.value)||0}))}/>
-              <div className="md:col-span-1 flex items-center">
-                <button onClick={handleAddIngredient} className="px-3 py-2 rounded-lg bg-emerald-600 text-white w-full">+ Tambah</button>
-              </div>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold">Inventori</h2>
+              <button className="px-3 py-2 rounded-lg border" onClick={async ()=>{
+                const name = prompt("Nama bahan:","Bahan Baru")?.trim(); if(!name) return;
+                const unit = prompt("Satuan (gr/ml/pcs):","pcs")?.trim() || "pcs";
+                const stock = Number(prompt("Stok awal:","0")||"0")||0;
+                const min = Number(prompt("Min. stok (peringatan):","0")||"0")||0;
+                await upsertIngredient({ name, unit, stock, min });
+              }}>+ Tambah</button>
             </div>
-
-            {/* Tabel bahan */}
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b">
-                    <th>Nama</th>
-                    <th>Satuan</th>
-                    <th className="text-right">Stok</th>
-                    <th className="text-right">Min</th>
-                    <th className="text-right">Aksi</th>
-                  </tr>
-                </thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Min</th><th className="text-right">Aksi</th></tr></thead>
                 <tbody>
-                  {ingredients.map(i=>{
-                    const editing = editIngId === i.id;
-                    const low = i.stock <= (i.min ?? 0);
-                    return (
-                      <tr key={i.id} className={`border-b ${low ? "bg-amber-50" : ""}`}>
-                        <td className="py-2">
-                          {editing
-                            ? <input className="border rounded px-2 py-1 w-full" value={editIngDraft.name} onChange={(e)=>setEditIngDraft(v=>({...v, name:e.target.value}))}/>
-                            : i.name}
-                        </td>
-                        <td>
-                          {editing
-                            ? <input className="border rounded px-2 py-1 w-24" value={editIngDraft.unit} onChange={(e)=>setEditIngDraft(v=>({...v, unit:e.target.value}))}/>
-                            : i.unit}
-                        </td>
-                        <td className="text-right">
-                          {editing
-                            ? <input type="number" className="border rounded px-2 py-1 w-24 text-right" value={editIngDraft.stock} onChange={(e)=>setEditIngDraft(v=>({...v, stock:Number(e.target.value)||0}))}/>
-                            : i.stock}
-                        </td>
-                        <td className="text-right">
-                          {editing
-                            ? <input type="number" className="border rounded px-2 py-1 w-20 text-right" value={editIngDraft.min} onChange={(e)=>setEditIngDraft(v=>({...v, min:Number(e.target.value)||0}))}/>
-                            : (i.min ?? 0)}
-                        </td>
-                        <td className="text-right">
-                          {editing ? (
-                            <div className="flex justify-end gap-2">
-                              <button onClick={saveEditIngredient} className="px-2 py-1 border rounded bg-emerald-50">Simpan</button>
-                              <button onClick={cancelEditIngredient} className="px-2 py-1 border rounded">Batal</button>
-                            </div>
-                          ) : (
-                            <div className="flex justify-end gap-2">
-                              <button onClick={()=>startEditIngredient(i)} className="px-2 py-1 border rounded">Edit</button>
-                              <button onClick={()=>deleteIngredientHard(i.id)} className="px-2 py-1 border rounded text-rose-600">Hapus</button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {ingredients.map(i=>(
+                    <tr key={i.id} className={`border-b ${i.stock <= (i.min||0) ? "bg-amber-50" : ""}`}>
+                      <td className="py-2">{i.name}</td>
+                      <td>{i.unit}</td>
+                      <td className="text-right">{i.stock}</td>
+                      <td className="text-right">{i.min||0}</td>
+                      <td className="text-right">
+                        <button className="px-2 py-1 border rounded mr-2" onClick={async ()=>{
+                          const name = prompt("Nama:", i.name) ?? i.name;
+                          const unit = prompt("Satuan:", i.unit) ?? i.unit;
+                          const stock = Number(prompt("Stok:", String(i.stock))||String(i.stock))||i.stock;
+                          const min = Number(prompt("Min stok:", String(i.min||0))||String(i.min||0))||i.min||0;
+                          await upsertIngredient({ id:i.id, name, unit, stock, min });
+                        }}>Edit</button>
+                        <button className="px-2 py-1 border rounded" onClick={()=>deleteIngredient(i.id)}>Hapus</button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
               {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
@@ -1159,11 +945,93 @@ img{display:block;margin:0 auto 6px;height:42px}
           </section>
         )}
 
-        {/* SETTINGS (placeholder) */}
-        {tab==="settings" && isOwner && (
-          <section className="bg-white rounded-2xl border p-3">
-            <h2 className="text-lg font-semibold mb-2">Pengaturan</h2>
-            <p className="text-sm text-neutral-600">Tempat atur pajak default, service, printer, dsb (coming soon).</p>
+        {/* RECIPES */}
+        {tab==="recipes" && isOwner && (
+          <section className="bg-white rounded-2xl border p-3 space-y-3">
+            <h2 className="text-lg font-semibold">Editor Resep</h2>
+
+            {/* pilih produk */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <label className="text-sm">
+                <div className="mb-1 text-neutral-600">Pilih Produk</div>
+                <select
+                  className="border rounded-lg px-3 py-2 w-full"
+                  value={recipeTabProdId}
+                  onChange={(e)=>{ const pid = e.target.value; startEditRecipe(pid); }}
+                >
+                  <option value="" disabled>Pilih…</option>
+                  {products.map(p=>(
+                    <option key={p.id} value={p.id}>{p.name} — {IDR(p.price)}</option>
+                  ))}
+                </select>
+              </label>
+
+              {recipeTabProdId && (
+                <div className="text-sm p-3 rounded-lg bg-neutral-50 border">
+                  <div><span className="text-neutral-500">Resep untuk:</span> <b>{products.find(p=>p.id===recipeTabProdId)?.name || "-"}</b></div>
+                  <div className="text-neutral-500 text-xs">ID: {recipeTabProdId}</div>
+                </div>
+              )}
+            </div>
+
+            {/* tabel bahan */}
+            {recipeTabProdId ? (
+              <div className="overflow-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left border-b">
+                      <th className="py-2">Bahan</th>
+                      <th className="py-2 w-28">Qty</th>
+                      <th className="py-2 w-28">Unit</th>
+                      <th className="py-2 w-20 text-right">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recipeDraft.map((row, idx)=>(
+                      <tr key={idx} className="border-b">
+                        <td className="py-2">
+                          <select
+                            className="border rounded-lg px-2 py-1 w-full"
+                            value={row.ingredientId}
+                            onChange={(e)=>{
+                              const ingId = e.target.value;
+                              const unit = ingredients.find(i=>i.id===ingId)?.unit || row.unit;
+                              changeRecipeRow(idx, { ingredientId: ingId, unit });
+                            }}
+                          >
+                            <option value="">Pilih bahan…</option>
+                            {ingredients.map(ing=>(
+                              <option key={ing.id} value={ing.id}>
+                                {ing.name} ({ing.unit}) • stok {ing.stock}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2">
+                          <input type="number" className="border rounded-lg px-2 py-1 w-full"
+                                 value={row.qty} onChange={e=>changeRecipeRow(idx, { qty: Number(e.target.value)||0 })} />
+                        </td>
+                        <td className="py-2">
+                          <input className="border rounded-lg px-2 py-1 w-full"
+                                 value={row.unit} onChange={e=>changeRecipeRow(idx, { unit: e.target.value })} placeholder="gr/ml/pcs" />
+                        </td>
+                        <td className="py-2 text-right">
+                          <button className="px-2 py-1 border rounded" onClick={()=>removeRecipeRow(idx)}>Hapus</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <div className="flex items-center gap-2 mt-3">
+                  <button className="px-3 py-2 rounded-lg border" onClick={addRecipeRow}>+ Tambah baris</button>
+                  <div className="flex-1" />
+                  <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={saveRecipe}>Simpan Resep</button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-neutral-500">Pilih produk terlebih dahulu.</div>
+            )}
           </section>
         )}
       </main>
