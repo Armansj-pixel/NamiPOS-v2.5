@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query,
-  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter
+  addDoc, collection, doc, getDoc, getDocs, increment, onSnapshot,
+  orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc,
+  where, limit, startAfter
 } from "firebase/firestore";
-import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import {
+  onAuthStateChanged, signInWithEmailAndPassword, signOut
+} from "firebase/auth";
 import { auth, db } from "./lib/firebase";
 
 /* ==========================
@@ -14,15 +17,26 @@ const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const QRIS_IMG_SRC = "/qris.png"; // letakkan file di /public/qris.png
+const QRIS_IMG_SRC = "/qris.png"; // taruh file di public/qris.png
 
 /* ==========================
    TYPES
 ========================== */
-type Product = { id: string; name: string; price: number; category?: string; active?: boolean; outlet?: string };
-type Ingredient = { id: string; name: string; unit: string; stock: number; min?: number; outlet?: string };
-type CartItem = { id: string; productId: string; name: string; price: number; qty: number; note?: string };
-type Shift = { id: string; outlet: string; openBy: string; openAt: Timestamp; closeAt?: Timestamp | null; openCash?: number; isOpen: boolean };
+type Product = {
+  id: string; name: string; price: number;
+  category?: string; active?: boolean; outlet?: string;
+};
+type Ingredient = {
+  id: string; name: string; unit: string;
+  stock: number; min?: number; outlet?: string;
+};
+type CartItem = {
+  id: string; productId: string; name: string; price: number; qty: number; note?: string;
+};
+type Shift = {
+  id: string; outlet: string; openBy: string; openAt: Timestamp;
+  closeAt?: Timestamp | null; openCash?: number; isOpen: boolean;
+};
 type Sale = {
   id?: string;
   outlet: string;
@@ -41,7 +55,13 @@ type Sale = {
    UTIL
 ========================== */
 const uid = () => Math.random().toString(36).slice(2, 10);
-const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
+const IDR = (n: number) =>
+  new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
+    maximumFractionDigits: 0,
+  }).format(n || 0);
+
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
@@ -55,7 +75,9 @@ export default function App() {
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
+  const [tab, setTab] = useState<
+    "dashboard"|"pos"|"history"|"products"|"inventory"|"settings"
+  >("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
@@ -92,8 +114,18 @@ export default function App() {
 
   /* ---- dashboard ---- */
   const [dashLoading, setDashLoading] = useState(false);
-  const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
+  const [todayStats, setTodayStats] = useState({
+    omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0,
+    topItems: [] as {name:string;qty:number}[]
+  });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
+
+  /* ---- settings (local) ---- */
+  const [receiptLogoUrl, setReceiptLogoUrl] = useState<string>(() => localStorage.getItem("receipt_logo_url") || "");
+  const [receiptHeader, setReceiptHeader] = useState<string>(() => localStorage.getItem("receipt_header") || `CHAFU MATCHA — ${OUTLET}`);
+
+  useEffect(()=>{ localStorage.setItem("receipt_logo_url", receiptLogoUrl || ""); },[receiptLogoUrl]);
+  useEffect(()=>{ localStorage.setItem("receipt_header", receiptHeader || ""); },[receiptHeader]);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -221,7 +253,11 @@ export default function App() {
   const inc = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:ci.qty+1 } : ci));
   const dec = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:Math.max(1, ci.qty-1) } : ci));
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
-  const clearCart = ()=> { setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput(""); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); };
+  const clearCart = ()=> {
+    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0);
+    setPayMethod("cash"); setCash(0); setNoteInput("");
+    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
+  };
 
   /* loyalty: auto lookup by phone */
   useEffect(()=>{
@@ -244,9 +280,16 @@ export default function App() {
 
   /* print 80mm */
   function printReceipt(rec: Omit<Sale,"id">, saleId?: string){
-    const itemsHtml = rec.items.map(i=>`<tr><td>${i.name}${i.note?`<div style='font-size:10px;opacity:.7'>${i.note}</div>`:""}</td><td style='text-align:center'>${i.qty}x</td><td style='text-align:right'>${IDR(i.price*i.qty)}</td></tr>`).join("");
+    const itemsHtml = rec.items.map(i=>
+      `<tr>
+        <td>${i.name}${i.note?`<div style='font-size:10px;opacity:.7'>${i.note}</div>`:""}</td>
+        <td style='text-align:center'>${i.qty}x</td>
+        <td style='text-align:right'>${IDR(i.price*i.qty)}</td>
+      </tr>`).join("");
+
     const w = window.open("", "_blank", "width=380,height=600");
     if(!w) return;
+
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Struk</title>
 <style>
 body{font-family:ui-monospace,Consolas,monospace}
@@ -255,19 +298,21 @@ h2{margin:6px 0;text-align:center}
 td{padding:4px 0;border-bottom:1px dashed #ccc;font-size:12px}
 .tot td{border-bottom:none;font-weight:700}
 .meta{font-size:12px;text-align:center;opacity:.8}
-img{display:block;margin:0 auto 6px;height:42px}
+img.logo{display:block;margin:0 auto 6px;max-height:42px}
+img.qr{display:block;margin:6px auto;height:120px}
 </style></head><body>
 <div class="wrap">
-  ${rec.payMethod!=="cash" ? `<img src="${QRIS_IMG_SRC}" onerror="this.style.display='none'"/>` : ""}
-  <h2>CHAFU MATCHA — ${OUTLET}</h2>
+  ${receiptLogoUrl ? `<img class="logo" src="${receiptLogoUrl}" onerror="this.style.display='none'"/>` : ""}
+  <h2>${receiptHeader || `CHAFU MATCHA — ${OUTLET}`}</h2>
   <div class="meta">${saleId||"DRAFT"}<br/>${new Date().toLocaleString("id-ID",{hour12:false})}</div>
+  ${rec.payMethod!=="cash" ? `<img class="qr" src="${QRIS_IMG_SRC}" onerror="this.style.display='none'"/>` : ""}
   <hr/>
   <table style="width:100%;border-collapse:collapse">
     ${itemsHtml}
     <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${IDR(rec.subtotal)}</td></tr>
-    ${rec.tax?`<tr class="tot"><td>Pajak</td><td></td><td style="text-align:right">${IDR(rec.tax)}</td></tr>`:""}
-    ${rec.service?`<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(rec.service)}</td></tr>`:""}
-    ${rec.discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(rec.discount)}</td></tr>`:""}
+    ${rec.tax?`<tr class="tot"><td>Pajak</td><td></td><td style='text-align:right'>${IDR(rec.tax)}</td></tr>`:""}
+    ${rec.service?`<tr class="tot"><td>Service</td><td></td><td style='text-align:right'>${IDR(rec.service)}</td></tr>`:""}
+    ${rec.discount?`<tr class="tot"><td>Diskon</td><td></td><td style='text-align:right'>-${IDR(rec.discount)}</td></tr>`:""}
     <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(rec.total)}</td></tr>
     ${rec.payMethod==="cash"
       ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(rec.cash||0)}</td></tr>
@@ -301,17 +346,15 @@ img{display:block;margin:0 auto 6px;height:42px}
     try{
       const ref = await addDoc(collection(db,"sales"), payload as any);
 
-      // loyalty
+      // loyalty (atomic)
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
-        const s = await getDoc(cref);
-        const pts = Math.floor(total/10000); // contoh: 10rb = 1 poin
-        if(s.exists()){
-          const c = s.data() as any;
-          await updateDoc(cref, { points:(c.points||0)+pts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
-        }else{
-          await setDoc(cref, { phone: customerPhone.trim(), name: customerName||"Member", points: pts, lastVisit: serverTimestamp() });
-        }
+        await setDoc(cref, {
+          phone: customerPhone.trim(),
+          name: customerName || "Member",
+          points: increment(Math.floor(total/10000)),
+          lastVisit: serverTimestamp(),
+        }, { merge: true });
       }
 
       printReceipt(payload, ref.id);
@@ -351,7 +394,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       setHistCursor(snap.docs.length? snap.docs[snap.docs.length-1] : null);
     }catch(e:any){
       if(String(e?.message||"").includes("index")){
-        alert("Riwayat butuh Firestore index.\nBuat index: sales → outlet(ASC), time(DESC)\n\n"+e.message);
+        alert("Riwayat butuh Firestore index.\nBuat index: sales → outlet(ASC), time(DESC)");
       }else{
         alert("Gagal memuat riwayat: "+(e?.message||e));
       }
@@ -394,7 +437,7 @@ img{display:block;margin:0 auto 6px;height:42px}
 
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
-      // 7 hari terakhir (H-6 s.d H)
+      // 7 hari terakhir
       const from7 = startOfDay(daysAgo(6));
       const q7 = query(
         collection(db,"sales"),
@@ -448,7 +491,7 @@ img{display:block;margin:0 auto 6px;height:42px}
   }
 
   /* ==========================
-     UI
+     UI: LOGIN
   =========================== */
   if(!user){
     return (
@@ -472,6 +515,9 @@ img{display:block;margin:0 auto 6px;height:42px}
     );
   }
 
+  /* ==========================
+     UI: MAIN
+  =========================== */
   return (
     <div className="min-h-screen bg-neutral-50">
       {/* Topbar */}
@@ -484,12 +530,13 @@ img{display:block;margin:0 auto 6px;height:42px}
               <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
             </div>
           </div>
-          <nav className="flex gap-2">
+          <nav className="flex gap-2 flex-wrap">
             {isOwner && <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Dashboard</button>}
             <button onClick={()=>setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Kasir</button>
             <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
             {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
             {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
+            {isOwner && <button onClick={()=>setTab("settings")} className={`px-3 py-1.5 rounded-lg border ${tab==="settings"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Pengaturan</button>}
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
@@ -518,7 +565,6 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
-            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -527,7 +573,6 @@ img{display:block;margin:0 auto 6px;height:42px}
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
 
-            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -770,6 +815,33 @@ img{display:block;margin:0 auto 6px;height:42px}
                 </tbody>
               </table>
               {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
+            </div>
+          </section>
+        )}
+
+        {/* SETTINGS (owner only) */}
+        {tab==="settings" && isOwner && (
+          <section className="bg-white rounded-2xl border p-3 space-y-3">
+            <h2 className="text-lg font-semibold">Pengaturan Struk</h2>
+            <label className="block">
+              <div className="text-sm mb-1">Logo Struk (URL gambar)</div>
+              <input
+                className="border rounded-lg px-3 py-2 w-full"
+                placeholder="https://….png"
+                value={receiptLogoUrl}
+                onChange={e=>setReceiptLogoUrl(e.target.value)}
+              />
+            </label>
+            <label className="block">
+              <div className="text-sm mb-1">Header Struk</div>
+              <input
+                className="border rounded-lg px-3 py-2 w-full"
+                value={receiptHeader}
+                onChange={e=>setReceiptHeader(e.target.value)}
+              />
+            </label>
+            <div className="text-xs text-neutral-500">
+              Pengaturan disimpan lokal di perangkat (localStorage). Untuk semua kasir, set di tiap device atau nanti bisa kita pindah ke Firestore.
             </div>
           </section>
         )}
