@@ -15,10 +15,10 @@ const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const QRIS_IMG_SRC = "/qris.png"; // letakkan file di public/qris.png
+const QRIS_IMG_SRC = "/qris.png";
 
 /* ==========================
-   TIPE DATA
+   TYPES
 ========================== */
 type Product = { id: string; name: string; price: number; category?: string; active?: boolean; outlet?: string };
 type Ingredient = { id: string; name: string; unit: string; stock: number; min?: number; outlet?: string };
@@ -46,33 +46,31 @@ const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",curre
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
-const dateKey = (d = new Date()) => {
-  const y = d.getFullYear();
-  const m = String(d.getMonth()+1).padStart(2,"0");
-  const dd = String(d.getDate()).padStart(2,"0");
-  return `${y}-${m}-${dd}`;
-};
+function dateKey(d: Date = new Date()) {
+  const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
+  return z.toISOString().slice(0, 10); // YYYY-MM-DD
+}
 
 /* ==========================
    APP
 ========================== */
 export default function App() {
-  /* ---- auth ---- */
+  // auth
   const [user, setUser] = useState<null | { email: string }>(null);
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
-  /* ---- tabs ---- */
+  // tabs
   const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
 
-  /* ---- login ---- */
+  // login form
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
 
-  /* ---- master data ---- */
+  // master
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
-  /* ---- POS ---- */
+  // POS
   const [queryText, setQueryText] = useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [noteInput, setNoteInput] = useState("");
@@ -83,26 +81,26 @@ export default function App() {
   const [cash, setCash] = useState<number>(0);
   const [showQR, setShowQR] = useState(false);
 
-  /* ---- loyalty ---- */
+  // loyalty
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPoints, setCustomerPoints] = useState<number|null>(null);
 
-  /* ---- shift ---- */
+  // shift
   const [activeShift, setActiveShift] = useState<Shift|null>(null);
   const [openCash, setOpenCash] = useState<number>(0);
 
-  /* ---- history ---- */
+  // history
   const [historyRows, setHistoryRows] = useState<Sale[]>([]);
   const [histCursor, setHistCursor] = useState<any>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  /* ---- dashboard ---- */
+  // dashboard
   const [dashLoading, setDashLoading] = useState(false);
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
-  /* ---- computed ---- */
+  // computed
   const filteredProducts = useMemo(
     () => products.filter(p => (p.active!==false) && p.name.toLowerCase().includes(queryText.toLowerCase())),
     [products, queryText]
@@ -113,9 +111,7 @@ export default function App() {
   const total = Math.max(0, subtotal + taxVal + svcVal - (discount||0));
   const change = Math.max(0, (cash||0) - total);
 
-  /* ==========================
-     AUTH WATCH
-  =========================== */
+  /* AUTH WATCH */
   useEffect(()=>{
     const unsub = onAuthStateChanged(auth, u=>{
       setUser(u?.email? {email:u.email}: null);
@@ -123,13 +119,10 @@ export default function App() {
     return () => unsub();
   },[]);
 
-  /* ==========================
-     LOAD DATA AFTER LOGIN
-  =========================== */
+  /* LOAD DATA AFTER LOGIN */
   useEffect(()=>{
     if(!user) return;
 
-    // products
     const qProd = query(collection(db,"products"), where("outlet","==",OUTLET));
     const unsubProd = onSnapshot(qProd, snap=>{
       const rows: Product[] = snap.docs.map(d=>{
@@ -139,7 +132,6 @@ export default function App() {
       setProducts(rows);
     }, err=>alert("Memuat produk gagal.\n"+(err.message||err)));
 
-    // ingredients
     const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
     const unsubIng = onSnapshot(qIng, snap=>{
       const rows: Ingredient[] = snap.docs.map(d=>{
@@ -149,17 +141,13 @@ export default function App() {
       setIngredients(rows);
     }, err=>alert("Memuat inventori gagal.\n"+(err.message||err)));
 
-    // shift + dashboard
     checkActiveShift().catch(e=>console.warn(e));
     loadDashboard().catch(()=>{});
 
     return ()=>{ unsubProd(); unsubIng(); };
-    // eslint-disable-next-line
   },[user?.email]);
 
-  /* ==========================
-     AUTH handlers
-  =========================== */
+  /* AUTH handlers */
   async function doLogin(e?: React.FormEvent){
     e?.preventDefault();
     try{
@@ -173,9 +161,7 @@ export default function App() {
   }
   async function doLogout(){ await signOut(auth); }
 
-  /* ==========================
-     SHIFT
-  =========================== */
+  /* SHIFT */
   async function checkActiveShift(){
     try{
       const qShift = query(
@@ -194,15 +180,7 @@ export default function App() {
         openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
       });
     }catch(e:any){
-      const msg = e?.message || String(e);
-      if (msg.includes("index")) {
-        alert(
-          "Gagal cek shift aktif.\nKemungkinan perlu Firestore index untuk koleksi 'shifts':\n" +
-          "outlet(ASC), isOpen(ASC), openAt(DESC)\n\n" + msg
-        );
-      } else {
-        alert("Gagal cek shift: " + msg);
-      }
+      alert("Gagal cek shift aktif.\nKemungkinan perlu Firestore index untuk koleksi 'shifts': outlet(ASC), isOpen(ASC), openAt(DESC)\n\n"+(e?.message||e));
     }
   }
 
@@ -217,81 +195,104 @@ export default function App() {
     await checkActiveShift();
   }
 
-  // REKAP & TUTUP SHIFT (baru)
+  // === PATCHED closeShiftAction (dengan fallback + rekap otomatis) ===
   async function closeShiftAction() {
-    if (!activeShift?.id) return;
+    if (!activeShift?.id) return alert("Tidak ada shift aktif.");
 
-    const closeAt = serverTimestamp();
-    await updateDoc(doc(db, "shifts", activeShift.id), { isOpen: false, closeAt });
+    try {
+      const closeAt = serverTimestamp();
+      await updateDoc(doc(db, "shifts", activeShift.id), { isOpen: false, closeAt });
 
-    // kumpulkan sales shift ini
-    const qs = query(
-      collection(db, "sales"),
-      where("outlet", "==", OUTLET),
-      where("shiftId", "==", activeShift.id)
-    );
-    const snap = await getDocs(qs);
+      // Ambil sales shift ini
+      let salesSnap;
+      try {
+        const q1 = query(
+          collection(db, "sales"),
+          where("outlet", "==", OUTLET),
+          where("shiftId", "==", activeShift.id)
+        );
+        salesSnap = await getDocs(q1);
+      } catch (e: any) {
+        console.warn("Query sales komposit gagal, fallback ke shiftId saja:", e?.message || e);
+        const q2 = query(collection(db, "sales"), where("shiftId", "==", activeShift.id));
+        salesSnap = await getDocs(q2);
+      }
 
-    let gross = 0, trx = 0, cashSum = 0, ewSum = 0, qrisSum = 0;
-    let tax = 0, service = 0, discount = 0;
+      // Hitung totals
+      let gross = 0, trx = 0, cashSum = 0, ewSum = 0, qrisSum = 0;
+      let tax = 0, service = 0, discount = 0;
 
-    snap.docs.forEach(d => {
-      const x = d.data() as any;
-      trx += 1;
-      gross += x.total || 0;
-      tax += x.tax || 0;
-      service += x.service || 0;
-      discount += x.discount || 0;
-      if (x.payMethod === "cash") cashSum += x.total || 0;
-      else if (x.payMethod === "ewallet") ewSum += x.total || 0;
-      else if (x.payMethod === "qris") qrisSum += x.total || 0;
-    });
+      salesSnap.docs.forEach(d => {
+        const x = d.data() as any;
+        trx += 1;
+        gross += x.total || 0;
+        tax += x.tax || 0;
+        service += x.service || 0;
+        discount += x.discount || 0;
+        if (x.payMethod === "cash") cashSum += x.total || 0;
+        else if (x.payMethod === "ewallet") ewSum += x.total || 0;
+        else if (x.payMethod === "qris") qrisSum += x.total || 0;
+      });
 
-    // tulis shift_reports
-    await setDoc(doc(db, "shift_reports", activeShift.id), {
-      outlet: OUTLET,
-      shiftId: activeShift.id,
-      openBy: activeShift.openBy,
-      openAt: activeShift.openAt || null,
-      closeAt,
-      openCash: activeShift.openCash || 0,
-      totals: { gross, trx, cash: cashSum, ewallet: ewSum, qris: qrisSum, tax, service, discount },
-      dateKey: dateKey(),
-      createdAt: serverTimestamp()
-    }, { merge: true });
+      // Simpan rekap shift
+      await setDoc(
+        doc(db, "shift_reports", activeShift.id),
+        {
+          outlet: OUTLET,
+          shiftId: activeShift.id,
+          openBy: activeShift.openBy,
+          openAt: activeShift.openAt || null,
+          closeAt,
+          openCash: activeShift.openCash || 0,
+          totals: { gross, trx, cash: cashSum, ewallet: ewSum, qris: qrisSum, tax, service, discount },
+          dateKey: dateKey(),
+          createdAt: serverTimestamp()
+        },
+        { merge: true }
+      );
 
-    // akumulasi harian
-    const dailyRef = doc(db, "reports_daily", `${OUTLET}_${dateKey()}`);
-    const prev = await getDoc(dailyRef);
-    const p: any = prev.exists() ? prev.data() : {};
-    await setDoc(dailyRef, {
-      outlet: OUTLET,
-      dateKey: dateKey(),
-      gross: (p.gross || 0) + gross,
-      trx: (p.trx || 0) + trx,
-      cash: (p.cash || 0) + cashSum,
-      ewallet: (p.ewallet || 0) + ewSum,
-      qris: (p.qris || 0) + qrisSum,
-      tax: (p.tax || 0) + tax,
-      service: (p.service || 0) + service,
-      discount: (p.discount || 0) + discount,
-      updatedAt: serverTimestamp()
-    }, { merge: true });
+      // Akumulasi harian
+      const dailyRef = doc(db, "reports_daily", `${OUTLET}_${dateKey()}`);
+      const prev = await getDoc(dailyRef);
+      const p: any = prev.exists() ? prev.data() : {};
+      await setDoc(
+        dailyRef,
+        {
+          outlet: OUTLET,
+          dateKey: dateKey(),
+          gross: (p.gross || 0) + gross,
+          trx: (p.trx || 0) + trx,
+          cash: (p.cash || 0) + cashSum,
+          ewallet: (p.ewallet || 0) + ewSum,
+          qris: (p.qris || 0) + qrisSum,
+          tax: (p.tax || 0) + tax,
+          service: (p.service || 0) + service,
+          discount: (p.discount || 0) + discount,
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      );
 
-    setActiveShift(null);
-    alert(
-      `Shift ditutup.\n\n` +
-      `Transaksi: ${trx}\n` +
-      `Omzet : ${IDR(gross)}\n` +
-      `Cash : ${IDR(cashSum)} | eWallet : ${IDR(ewSum)} | QRIS : ${IDR(qrisSum)}`
-    );
-
-    loadDashboard().catch(() => {});
+      setActiveShift(null);
+      alert(
+        `Shift ditutup.\n\n` +
+        `Transaksi: ${trx}\n` +
+        `Omzet  : ${IDR(gross)}\n` +
+        `Cash   : ${IDR(cashSum)} | eWallet: ${IDR(ewSum)} | QRIS: ${IDR(qrisSum)}`
+      );
+      if (isOwner) loadDashboard().catch(() => {});
+    } catch (e: any) {
+      alert(
+        "Tutup shift gagal.\n" +
+        (e?.message || e) +
+        "\n\nJika error menyebut 'index', pastikan index Firestore untuk " +
+        "koleksi 'sales' (outlet ASC, shiftId ASC) sudah selesai."
+      );
+      console.error(e);
+    }
   }
 
-  /* ==========================
-     POS
-  =========================== */
+  /* POS */
   function addToCart(p: Product){
     setCart(prev=>{
       const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
@@ -363,7 +364,6 @@ img{display:block;margin:0 auto 6px;height:42px}
     w.document.write(html); w.document.close();
   }
 
-  // finalize
   async function finalize(){
     if(!user?.email) return alert("Belum login.");
     if(!activeShift?.id) return alert("Buka shift dahulu.");
@@ -386,7 +386,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
         const s = await getDoc(cref);
-        const pts = Math.floor(total/10000); // 10rb=1 poin
+        const pts = Math.floor(total/10000);
         if(s.exists()){
           const c = s.data() as any;
           await updateDoc(cref, { points:(c.points||0)+pts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
@@ -405,9 +405,7 @@ img{display:block;margin:0 auto 6px;height:42px}
     }
   }
 
-  /* ==========================
-     HISTORY
-  =========================== */
+  /* HISTORY */
   async function loadHistory(append:boolean){
     if(!user) return;
     setHistoryLoading(true);
@@ -439,14 +437,11 @@ img{display:block;margin:0 auto 6px;height:42px}
     }finally{ setHistoryLoading(false); }
   }
 
-  /* ==========================
-     DASHBOARD
-  =========================== */
+  /* DASHBOARD */
   async function loadDashboard(){
     if(!isOwner) return;
     setDashLoading(true);
     try {
-      // Hari ini
       const qToday = query(
         collection(db,"sales"),
         where("outlet","==",OUTLET),
@@ -472,9 +467,9 @@ img{display:block;margin:0 auto 6px;height:42px}
         .map(([name,qty])=>({name,qty}))
         .sort((a,b)=>b.qty-a.qty)
         .slice(0,5);
+
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
-      // 7 hari terakhir
       const from7 = startOfDay(daysAgo(6));
       const q7 = query(
         collection(db,"sales"),
@@ -503,9 +498,7 @@ img{display:block;margin:0 auto 6px;height:42px}
     }
   }
 
-  /* ==========================
-     OWNER: PRODUCTS & INVENTORY
-  =========================== */
+  /* OWNER: PRODUCTS & INVENTORY */
   async function upsertProduct(p: Partial<Product> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = p.id || uid();
@@ -527,27 +520,7 @@ img{display:block;margin:0 auto 6px;height:42px}
     }, { merge:true });
   }
 
-  // ====== Modal Edit Produk ======
-  const [editingProduct, setEditingProduct] = useState<null | {
-    id?: string; name: string; price: number; category?: string; active?: boolean;
-  }>(null);
-  function startAddProduct(){ setEditingProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true }); }
-  function startEditProduct(p: Product){ setEditingProduct({ id:p.id, name:p.name, price:p.price, category:p.category||"Signature", active:p.active!==false }); }
-  async function saveEditingProduct(){
-    if(!editingProduct) return;
-    await upsertProduct({
-      id: editingProduct.id,
-      name: editingProduct.name.trim() || "Produk",
-      price: Number(editingProduct.price) || 0,
-      category: editingProduct.category || "Signature",
-      active: editingProduct.active !== false
-    });
-    setEditingProduct(null);
-  }
-
-  /* ==========================
-     UI
-  =========================== */
+  /* UI: LOGIN */
   if(!user){
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
@@ -570,6 +543,7 @@ img{display:block;margin:0 auto 6px;height:42px}
     );
   }
 
+  /* UI: MAIN */
   return (
     <div className="min-h-screen bg-neutral-50">
       {/* Topbar */}
@@ -616,7 +590,6 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
-            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -624,8 +597,6 @@ img{display:block;margin:0 auto 6px;height:42px}
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
-
-            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -639,7 +610,6 @@ img{display:block;margin:0 auto 6px;height:42px}
                   </tbody>
                 </table>
               </div>
-
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
@@ -823,7 +793,7 @@ img{display:block;margin:0 auto 6px;height:42px}
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={startAddProduct}>+ Tambah</button>
+              <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -835,7 +805,7 @@ img{display:block;margin:0 auto 6px;height:42px}
                       <td>{p.category||"-"}</td>
                       <td className="text-right">{IDR(p.price)}</td>
                       <td className="text-right">
-                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>startEditProduct(p)}>Edit</button>
+                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>upsertProduct({ id:p.id, name:p.name+" *", price:p.price, category:p.category, active:p.active })}>Edit</button>
                         <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
                       </td>
                     </tr>
@@ -879,56 +849,6 @@ img{display:block;margin:0 auto 6px;height:42px}
           <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
             <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
             <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Edit/Tambah Produk */}
-      {editingProduct && (
-        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center" onClick={() => setEditingProduct(null)}>
-          <div className="bg-white rounded-2xl p-4 w-[92vw] max-w-md" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold mb-3">{editingProduct.id ? "Edit Produk" : "Produk Baru"}</h3>
-            <div className="space-y-2">
-              <label className="block text-sm">
-                <span>Nama</span>
-                <input
-                  className="mt-1 w-full border rounded-lg px-3 py-2"
-                  type="text"
-                  value={editingProduct.name}
-                  onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
-                />
-              </label>
-              <label className="block text-sm">
-                <span>Harga</span>
-                <input
-                  className="mt-1 w-full border rounded-lg px-3 py-2"
-                  type="number"
-                  value={editingProduct.price}
-                  onChange={(e) => setEditingProduct({ ...editingProduct, price: Number(e.target.value) || 0 })}
-                />
-              </label>
-              <label className="block text-sm">
-                <span>Kategori</span>
-                <input
-                  className="mt-1 w-full border rounded-lg px-3 py-2"
-                  type="text"
-                  value={editingProduct.category || ""}
-                  onChange={(e) => setEditingProduct({ ...editingProduct, category: e.target.value })}
-                />
-              </label>
-              <label className="inline-flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={editingProduct.active !== false}
-                  onChange={(e) => setEditingProduct({ ...editingProduct, active: e.target.checked })}
-                />
-                Aktif
-              </label>
-            </div>
-            <div className="mt-4 flex justify-end gap-2">
-              <button className="px-3 py-2 rounded-lg border" onClick={() => setEditingProduct(null)}>Batal</button>
-              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={saveEditingProduct}>Simpan</button>
-            </div>
           </div>
         </div>
       )}
