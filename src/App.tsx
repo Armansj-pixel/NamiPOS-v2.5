@@ -1,23 +1,23 @@
-// src/App.tsx — NamiPOS V2.4.1 (Public Order + Orders Inbox)
-// ==========================================================
-import React, { useEffect, useMemo, useState } from "react";
+// src/App.tsx — NamiPOS V2.4.2 (Kasir + Public Order + Orders Inbox)
+import React, { useState, useEffect } from "react";
 import {
   getAuth,
-  onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut,
+  onAuthStateChanged,
 } from "firebase/auth";
 import {
-  getFirestore,
   collection,
+  addDoc,
+  getDocs,
+  getFirestore,
   query,
   where,
   orderBy,
-  onSnapshot,
-  getDocs,
-  addDoc,
   updateDoc,
+  deleteDoc,
   doc,
+  getDoc,
   serverTimestamp,
 } from "firebase/firestore";
 import app from "./lib/firebase";
@@ -25,605 +25,264 @@ import app from "./lib/firebase";
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-// ================== KONFIG ==================
-const OUTLET = "MTHaryono"; // ganti sesuai outlet
-const CURRENCY = "IDR";
-const IDR = (n: number) =>
-  new Intl.NumberFormat("id-ID", {
-    style: "currency",
-    currency: CURRENCY,
-    maximumFractionDigits: 0,
-  }).format(n || 0);
-
-// ================ APP =======================
 export default function App() {
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState(null);
+  const [page, setPage] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<
-    "dashboard" | "kasir" | "riwayat" | "produk" | "inventori" | "resep" | "orders"
-  >("kasir");
-  const [shiftOpen, setShiftOpen] = useState(false);
-  const [activeShiftId, setActiveShiftId] = useState<string | null>(null);
 
-  // Rute publik: /order
-  const isPublicOrder =
-    typeof window !== "undefined" &&
-    (window.location.pathname === "/order" ||
-      window.location.hash.startsWith("#/order"));
+  // kasir
+  const [cart, setCart] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [subtotal, setSubtotal] = useState(0);
+  const [shift, setShift] = useState(null);
+
+  // orders
+  const [orders, setOrders] = useState([]);
+  const [publicOrders, setPublicOrders] = useState([]);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      setLoading(false);
-      if (u) checkShift();
+      if (u) setPage("kasir");
+      else setPage("login");
     });
     return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function checkShift() {
-    // cari shift aktif
-    const qy = query(
-      collection(db, "shifts"),
-      where("outlet", "==", OUTLET),
-      where("isOpen", "==", true),
-      orderBy("openAt", "desc")
-    );
-    const snap = await getDocs(qy);
-    if (!snap.empty) {
-      setShiftOpen(true);
-      setActiveShiftId(snap.docs[0].id);
-    } else {
-      setShiftOpen(false);
-      setActiveShiftId(null);
-    }
-  }
-
-  async function handleLogin(e: React.FormEvent) {
-    e.preventDefault();
+  // --- LOGIN ---
+  const handleLogin = async () => {
     try {
       await signInWithEmailAndPassword(auth, email, password);
-    } catch (err: any) {
+    } catch (err) {
       alert("Login gagal: " + err.message);
     }
-  }
-  async function handleLogout() {
+  };
+
+  const handleLogout = async () => {
     await signOut(auth);
-  }
+    setUser(null);
+    setPage("login");
+  };
 
-  async function handleOpenShift() {
-    const code = prompt("Masukkan kode shift (opsional):") || "";
-    try {
-      const ref = await addDoc(collection(db, "shifts"), {
-        outlet: OUTLET,
-        openedBy: user?.email,
-        openAt: serverTimestamp(),
-        isOpen: true,
-        code,
-      });
-      setShiftOpen(true);
-      setActiveShiftId(ref.id);
-      alert("Shift dibuka!");
-    } catch (e: any) {
-      alert("Gagal buka shift: " + e.message);
-    }
-  }
-  async function handleCloseShift() {
-    try {
-      if (!activeShiftId) {
-        await checkShift();
-      }
-      if (!activeShiftId) {
-        alert("Tidak ada shift aktif.");
-        return;
-      }
-      await updateDoc(doc(db, "shifts", activeShiftId), {
-        isOpen: false,
-        closeAt: serverTimestamp(),
-      });
-      setShiftOpen(false);
-      setActiveShiftId(null);
-      alert("Shift ditutup!");
-    } catch (e: any) {
-      alert("Gagal tutup shift: " + e.message);
-    }
-  }
-
-  // ====== RENDER untuk /order (tanpa login) ======
-  if (isPublicOrder) {
-    return <PublicOrder outlet={OUTLET} />;
-  }
-
-  if (loading) return <p>Loading…</p>;
-
-  if (!user)
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-neutral-50">
-        <form
-          onSubmit={handleLogin}
-          className="bg-white p-6 rounded-xl shadow-md border w-80"
-        >
-          <img
-            src="/logo-pos.png"
-            alt="NamiPOS"
-            className="h-12 mx-auto mb-3"
-            onError={(e: any) => (e.currentTarget.style.display = "none")}
-          />
-          <h2 className="text-lg font-semibold mb-4 text-center">
-            Login ke NamiPOS
-          </h2>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="Email"
-            className="w-full border rounded p-2 mb-2"
-          />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Password"
-            className="w-full border rounded p-2 mb-3"
-          />
-          <button
-            type="submit"
-            className="w-full bg-green-700 text-white rounded p-2"
-          >
-            Masuk
-          </button>
-        </form>
-      </div>
-    );
-
-  return (
-    <div className="min-h-screen bg-neutral-50 p-4">
-      <header className="flex justify-between items-center mb-4">
-        <div className="flex items-center gap-3">
-          <img
-            src="/logo-pos.png"
-            alt="NamiPOS"
-            className="h-8"
-            onError={(e: any) => (e.currentTarget.style.display = "none")}
-          />
-          <div>
-            <h1 className="font-bold text-lg">NamiPOS — {OUTLET}</h1>
-            <p className="text-sm text-neutral-600">
-              Masuk: {user.email} ·{" "}
-              <span className="font-medium">
-                {user.email.includes("owner") ? "owner" : "staff"}
-              </span>
-            </p>
-          </div>
-        </div>
-        <nav className="space-x-2">
-          {["Dashboard", "Kasir", "Riwayat", "Produk", "Inventori", "Resep", "Orders"].map(
-            (tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab.toLowerCase() as any)}
-                className={`px-3 py-1 rounded border ${
-                  activeTab === (tab.toLowerCase() as any)
-                    ? "bg-green-100 border-green-700"
-                    : "bg-white"
-                }`}
-              >
-                {tab}
-              </button>
-            )
-          )}
-          <a
-            href="/order"
-            className="px-3 py-1 rounded border bg-emerald-50"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Link Order Publik
-          </a>
-          <button
-            onClick={handleLogout}
-            className="px-3 py-1 rounded bg-red-50 text-red-700 border"
-          >
-            Keluar
-          </button>
-        </nav>
-      </header>
-
-      <section className="bg-white p-4 rounded-xl shadow border">
-        <div className="flex items-center justify-between mb-3">
-          {!shiftOpen ? (
-            <>
-              <p className="text-neutral-500">Belum ada shift aktif</p>
-              <button
-                onClick={handleOpenShift}
-                className="bg-green-700 text-white rounded px-3 py-1"
-              >
-                Buka Shift
-              </button>
-            </>
-          ) : (
-            <>
-              <p>
-                <b>Shift</b> OPEN • {user.email}
-              </p>
-              <button
-                onClick={handleCloseShift}
-                className="bg-red-600 text-white rounded px-3 py-1"
-              >
-                Tutup Shift
-              </button>
-            </>
-          )}
-        </div>
-
-        {/* Tab konten */}
-        {activeTab === "dashboard" && <div>Dashboard Ringkasan</div>}
-        {activeTab === "kasir" && <div>Kasir Aktif</div>}
-        {activeTab === "riwayat" && <div>Riwayat Transaksi</div>}
-        {activeTab === "produk" && <div>Manajemen Produk</div>}
-        {activeTab === "inventori" && <div>Inventori & Stok</div>}
-        {activeTab === "resep" && <div>Manajemen Resep</div>}
-        {activeTab === "orders" && (
-          <OrdersInbox
-            outlet={OUTLET}
-            activeShiftId={activeShiftId}
-            cashierEmail={user.email}
-          />
-        )}
-      </section>
-    </div>
-  );
-}
-
-// ================== PUBLIC ORDER ===================
-type Product = {
-  id: string;
-  name: string;
-  price: number;
-  category?: string;
-  active?: boolean;
-  outlet?: string;
-};
-type CartItem = { productId: string; name: string; price: number; qty: number };
-
-function PublicOrder({ outlet }: { outlet: string }) {
-  const [loading, setLoading] = useState(true);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [search, setSearch] = useState("");
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [step, setStep] = useState<"browse" | "checkout" | "done">("browse");
-  const [custName, setCustName] = useState("");
-  const [custPhone, setCustPhone] = useState("");
-  const [custAddr, setCustAddr] = useState("");
-  const [orderId, setOrderId] = useState<string | null>(null);
+  // --- KASIR ---
+  const loadProducts = async () => {
+    const snap = await getDocs(collection(db, "products"));
+    setProducts(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  };
 
   useEffect(() => {
-    const q = query(collection(db, "products"), where("outlet", "==", outlet));
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const rows: Product[] = snap.docs.map((d) => {
-          const x = d.data() as any;
-          return {
-            id: d.id,
-            name: x.name,
-            price: x.price || 0,
-            category: x.category || "Menu",
-            active: x.active !== false,
-            outlet: x.outlet,
-          };
-        });
-        setProducts(rows.filter((p) => p.active !== false));
-        setLoading(false);
-      },
-      (err) => {
-        alert("Gagal memuat produk: " + err.message);
-        setLoading(false);
-      }
-    );
-    return () => unsub();
-  }, [outlet]);
+    if (user) loadProducts();
+  }, [user]);
 
-  const shown = useMemo(
-    () =>
-      products.filter((p) =>
-        p.name.toLowerCase().includes(search.toLowerCase())
-      ),
-    [products, search]
-  );
+  const addToCart = (p) => {
+    setCart((prev) => [...prev, { ...p, qty: 1 }]);
+  };
 
-  const subtotal = cart.reduce((s, c) => s + c.price * c.qty, 0);
+  const calcSubtotal = () => {
+    const total = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
+    setSubtotal(total);
+  };
 
-  function addToCart(p: Product) {
-    setCart((prev) => {
-      const idx = prev.findIndex((c) => c.productId === p.id);
-      if (idx >= 0) {
-        const next = [...prev];
-        next[idx] = { ...next[idx], qty: next[idx].qty + 1 };
-        return next;
-      }
-      return [
-        ...prev,
-        { productId: p.id, name: p.name, price: p.price, qty: 1 },
-      ];
-    });
-  }
-  const inc = (i: number) =>
-    setCart((prev) => prev.map((c, idx) => (idx === i ? { ...c, qty: c.qty + 1 } : c)));
-  const dec = (i: number) =>
-    setCart((prev) =>
-      prev
-        .map((c, idx) => (idx === i ? { ...c, qty: Math.max(1, c.qty - 1) } : c))
-        .filter((c) => c.qty > 0)
-    );
-  const rm = (i: number) =>
-    setCart((prev) => prev.filter((_, idx) => idx !== i));
+  useEffect(calcSubtotal, [cart]);
 
-  async function submitOrder() {
-    if (!custName || !custPhone || cart.length === 0) {
-      alert("Lengkapi data dan keranjang terlebih dahulu.");
-      return;
-    }
+  const handleSaveSale = async () => {
     try {
-      const ref = await addDoc(collection(db, "orders"), {
-        outlet,
-        origin: "public",
-        customer: { name: custName, phone: custPhone, address: custAddr },
+      const saleRef = await addDoc(collection(db, "sales"), {
         items: cart,
-        subtotal,
-        total: subtotal, // bisa tambah ongkir / pajak nanti
-        status: "pending",
-        createdAt: serverTimestamp(),
+        total: subtotal,
+        cashier: user.email,
+        time: serverTimestamp(),
       });
-      setOrderId(ref.id);
-      setStep("done");
-    } catch (e: any) {
-      alert("Gagal membuat pesanan: " + e.message);
+      alert("Transaksi tersimpan #" + saleRef.id);
+      setCart([]);
+    } catch (err) {
+      alert("Gagal simpan transaksi: " + err.message);
     }
-  }
+  };
 
-  if (loading)
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        Memuat menu…
-      </div>
-    );
+  // --- SHIFT ---
+  const openShift = async () => {
+    const ref = await addDoc(collection(db, "shifts"), {
+      user: user.email,
+      openAt: serverTimestamp(),
+      isOpen: true,
+    });
+    setShift({ id: ref.id, user: user.email });
+  };
 
-  if (step === "done")
-    return (
-      <div className="min-h-screen bg-neutral-50 flex items-center justify-center p-6">
-        <div className="w-full max-w-md bg-white rounded-2xl shadow border p-6 text-center">
-          <img
-            src="/logo-pos.png"
-            alt="NamiPOS"
-            className="h-10 mx-auto mb-2"
-            onError={(e: any) => (e.currentTarget.style.display = "none")}
-          />
-          <h1 className="text-xl font-bold mb-1">Pesanan terkirim!</h1>
-          <p className="text-sm text-neutral-600">
-            Kode pesanan: <b>{orderId}</b>
-          </p>
-          <p className="text-sm text-neutral-600 mt-1">
-            Kami akan konfirmasi via WhatsApp/SMS ya.
-          </p>
-          <a
-            href="/order"
-            className="inline-block mt-4 px-4 py-2 rounded-lg border hover:bg-neutral-50"
-          >
-            Buat pesanan baru
-          </a>
-          <a
-            href="/"
-            className="inline-block mt-4 ml-2 px-4 py-2 rounded-lg border hover:bg-neutral-50"
-          >
-            Kembali ke POS
-          </a>
-        </div>
-      </div>
-    );
+  const closeShift = async () => {
+    if (!shift) return alert("Belum ada shift aktif");
+    await updateDoc(doc(db, "shifts", shift.id), {
+      isOpen: false,
+      closeAt: serverTimestamp(),
+    });
+    setShift(null);
+    alert("Shift ditutup");
+  };
 
-  return (
-    <div className="min-h-screen bg-neutral-50 p-4">
-      <div className="max-w-5xl mx-auto grid md:grid-cols-3 gap-4">
-        {/* Katalog */}
-        <section className="md:col-span-2">
-          <div className="bg-white border rounded-2xl p-3 mb-3">
-            <div className="flex items-center gap-2">
-              <img
-                src="/logo-pos.png"
-                alt="NamiPOS"
-                className="h-7"
-                onError={(e: any) => (e.currentTarget.style.display = "none")}
-              />
-              <div>
-                <div className="font-bold">Order Online — {outlet}</div>
-                <div className="text-xs text-neutral-500">
-                  Pilih menu, lalu lanjutkan checkout.
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white border rounded-2xl p-3">
-            <input
-              className="border rounded-lg px-3 py-2 w-full mb-3"
-              placeholder="Cari menu…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-
-            {shown.length === 0 && (
-              <div className="text-sm text-neutral-500">Menu tidak ditemukan.</div>
-            )}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-              {shown.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => addToCart(p)}
-                  className="bg-white rounded-2xl border p-3 text-left hover:shadow"
-                >
-                  <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2" />
-                  <div className="font-medium leading-tight">{p.name}</div>
-                  <div className="text-xs text-neutral-500">
-                    {p.category || "Menu"}
-                  </div>
-                  <div className="font-semibold mt-1">{IDR(p.price)}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {/* Keranjang / Checkout */}
-        <aside>
-          <div className="bg-white border rounded-2xl p-3">
-            <h3 className="font-semibold mb-2">Keranjang</h3>
-            {cart.length === 0 ? (
-              <div className="text-sm text-neutral-500">
-                Belum ada item. Ketuk menu untuk menambahkan.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {cart.map((c, i) => (
-                  <div
-                    key={i}
-                    className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2"
-                  >
-                    <div className="col-span-6">
-                      <div className="font-medium leading-tight">{c.name}</div>
-                      <div className="text-xs text-neutral-500">
-                        {IDR(c.price)}
-                      </div>
-                    </div>
-                    <div className="col-span-4 flex items-center justify-end gap-2">
-                      <button
-                        className="px-2 py-1 border rounded"
-                        onClick={() => dec(i)}
-                      >
-                        -
-                      </button>
-                      <div className="w-8 text-center font-medium">{c.qty}</div>
-                      <button
-                        className="px-2 py-1 border rounded"
-                        onClick={() => inc(i)}
-                      >
-                        +
-                      </button>
-                    </div>
-                    <div className="col-span-2 text-right">
-                      <button
-                        className="px-2 py-1 rounded border"
-                        onClick={() => rm(i)}
-                      >
-                        x
-                      </button>
-                    </div>
-                  </div>
-                ))}
-
-                <div className="border-t pt-2">
-                  <div className="flex items-center justify-between text-sm">
-                    <span>Subtotal</span>
-                    <span className="font-semibold">{IDR(subtotal)}</span>
-                  </div>
-                </div>
-
-                {step === "browse" ? (
-                  <button
-                    className="w-full px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
-                    disabled={cart.length === 0}
-                    onClick={() => setStep("checkout")}
-                  >
-                    Lanjut Checkout
-                  </button>
-                ) : (
-                  <>
-                    <div className="grid gap-2">
-                      <input
-                        className="border rounded-lg px-3 py-2"
-                        placeholder="Nama"
-                        value={custName}
-                        onChange={(e) => setCustName(e.target.value)}
-                      />
-                      <input
-                        className="border rounded-lg px-3 py-2"
-                        placeholder="No HP (WA)"
-                        value={custPhone}
-                        onChange={(e) => setCustPhone(e.target.value)}
-                      />
-                      <textarea
-                        className="border rounded-lg px-3 py-2"
-                        placeholder="Alamat (opsional)"
-                        value={custAddr}
-                        onChange={(e) => setCustAddr(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      className="w-full px-3 py-2 rounded-lg bg-emerald-600 text-white"
-                      onClick={submitOrder}
-                    >
-                      Kirim Pesanan ({IDR(subtotal)})
-                    </button>
-                    <button
-                      className="w-full px-3 py-2 rounded-lg border"
-                      onClick={() => setStep("browse")}
-                    >
-                      Kembali
-                    </button>
-                  </>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="text-xs text-neutral-500 text-center mt-3">
-            Powered by NamiPOS • <a href="/">Kembali ke POS</a>
-          </div>
-        </aside>
-      </div>
-    </div>
-  );
-}
-
-// ================== ORDERS INBOX (STAFF) ===================
-type OrderDoc = {
-  id: string;
-  outlet: string;
-  origin: "public" | "internal";
-  customer: { name: string; phone: string; address?: string };
-  items: { productId: string; name: string; price: number; qty: number }[];
-  subtotal: number;
-  total: number;
-  status: "pending" | "accepted" | "preparing" | "completed" | "rejected";
-  createdAt?: any;
-};
-
-function OrdersInbox({
-  outlet,
-  activeShiftId,
-  cashierEmail,
-}: {
-  outlet: string;
-  activeShiftId: string | null;
-  cashierEmail: string;
-}) {
-  const [rows, setRows] = useState<OrderDoc[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<
-    "all" | "pending" | "accepted" | "preparing"
-  >("pending");
+  // --- PUBLIC ORDERS ---
+  const loadOrders = async () => {
+    const snap = await getDocs(query(collection(db, "orders"), orderBy("time", "desc")));
+    setOrders(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+  };
 
   useEffect(() => {
-    const qy = query(
-      collection(db, "orders"),
-      where("outlet", "==", outlet),
-      orderBy("createdAt", "desc")
+    if (page === "orders") loadOrders();
+  }, [page]);
+
+  const createPublicOrder = async (name, phone, items) => {
+    await addDoc(collection(db, "orders"), {
+      name,
+      phone,
+      items,
+      time: serverTimestamp(),
+      status: "pending",
+    });
+    alert("Pesanan berhasil dikirim!");
+  };
+
+  // --- UI ---
+
+  if (page === "login")
+    return (
+      <div className="p-4 max-w-sm mx-auto">
+        <h1 className="text-2xl font-bold mb-2 text-center">NamiPOS — Login</h1>
+        <input
+          placeholder="Email"
+          className="border p-2 w-full mb-2"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          className="border p-2 w-full mb-4"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <button
+          onClick={handleLogin}
+          className="bg-green-600 text-white w-full py-2 rounded"
+        >
+          Masuk
+        </button>
+      </div>
     );
-    const unsub = onSnapshot(
-      qy,
-      (snap) => {
-        const list: OrderDoc[] = snap.docs.map((d) => ({
-          id: d.id,
-          ...(d.data
+
+  // --- NAVBAR ---
+  const Nav = () => (
+    <div className="flex flex-wrap gap-2 p-2 border-b">
+      <button onClick={() => setPage("dashboard")}>Dashboard</button>
+      <button onClick={() => setPage("kasir")}>Kasir</button>
+      <button onClick={() => setPage("orders")}>Orders</button>
+      <button onClick={() => setPage("public")}>Order Publik</button>
+      <button onClick={handleLogout} className="text-red-600">
+        Keluar
+      </button>
+    </div>
+  );
+
+  // --- DASHBOARD ---
+  if (page === "dashboard")
+    return (
+      <div className="p-4">
+        <Nav />
+        <h2 className="font-bold text-xl mb-2">Dashboard</h2>
+        <p>Selamat datang, {user.email}</p>
+      </div>
+    );
+
+  // --- KASIR ---
+  if (page === "kasir")
+    return (
+      <div className="p-4">
+        <Nav />
+        <h2 className="font-bold text-xl mb-3">Kasir</h2>
+        <button
+          onClick={shift ? closeShift : openShift}
+          className={`px-3 py-1 rounded ${
+            shift ? "bg-red-500" : "bg-green-500"
+          } text-white`}
+        >
+          {shift ? "Tutup Shift" : "Buka Shift"}
+        </button>
+
+        <div className="grid grid-cols-2 gap-2 my-4">
+          {products.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => addToCart(p)}
+              className="border p-2 rounded text-left"
+            >
+              <div className="font-semibold">{p.name}</div>
+              <div>Rp {p.price?.toLocaleString()}</div>
+            </button>
+          ))}
+        </div>
+
+        <h3 className="font-semibold mt-4">Keranjang</h3>
+        {cart.map((i, idx) => (
+          <div key={idx} className="flex justify-between border-b py-1">
+            <span>{i.name}</span>
+            <span>Rp {i.price?.toLocaleString()}</span>
+          </div>
+        ))}
+
+        <div className="mt-3 font-bold">
+          Total: Rp {subtotal.toLocaleString()}
+        </div>
+        <button
+          onClick={handleSaveSale}
+          className="bg-green-600 text-white px-3 py-2 mt-3 rounded"
+        >
+          Simpan & Cetak
+        </button>
+      </div>
+    );
+
+  // --- ORDERS INBOX ---
+  if (page === "orders")
+    return (
+      <div className="p-4">
+        <Nav />
+        <h2 className="text-xl font-bold mb-2">Daftar Order Masuk</h2>
+        {orders.map((o) => (
+          <div key={o.id} className="border p-2 mb-2 rounded">
+            <p className="font-semibold">{o.name} ({o.phone})</p>
+            <p>Status: {o.status}</p>
+            <ul className="list-disc ml-4">
+              {o.items?.map((it, i) => (
+                <li key={i}>{it.name} x{it.qty}</li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    );
+
+  // --- PUBLIC ORDER PAGE ---
+  if (page === "public")
+    return (
+      <div className="p-4 max-w-sm mx-auto">
+        <h2 className="font-bold text-xl mb-2 text-center">Order Online</h2>
+        <input id="name" className="border p-2 w-full mb-2" placeholder="Nama" />
+        <input id="phone" className="border p-2 w-full mb-2" placeholder="No HP" />
+        <textarea id="items" className="border p-2 w-full mb-2" placeholder="Pesanan (pisahkan koma)"></textarea>
+        <button
+          onClick={() => {
+            const name = document.getElementById("name").value;
+            const phone = document.getElementById("phone").value;
+            const itemsText = document.getElementById("items").value;
+            const items = itemsText.split(",").map((t) => ({ name: t.trim(), qty: 1 }));
+            createPublicOrder(name, phone, items);
+          }}
+          className="bg-green-600 text-white w-full py-2 rounded"
+        >
+          Kirim Pesanan
+        </button>
+      </div>
+    );
+
+  return null;
+}
