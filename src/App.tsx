@@ -1,42 +1,29 @@
+// src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  addDoc, collection, doc, getDoc, getDocs, increment, onSnapshot,
-  orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc,
-  where, limit, startAfter
+  addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query,
+  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter
 } from "firebase/firestore";
-import {
-  onAuthStateChanged, signInWithEmailAndPassword, signOut
-} from "firebase/auth";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
 
 /* ==========================
-   KONFIG
+   KONFIGURASI
 ========================== */
 const OUTLET = "MTHaryono";
 const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const QRIS_IMG_SRC = "/qris.png"; // taruh file di public/qris.png
+const QRIS_IMG_SRC = "/qris.png"; // letakkan file di public/qris.png
 
 /* ==========================
-   TYPES
+   TIPE DATA
 ========================== */
-type Product = {
-  id: string; name: string; price: number;
-  category?: string; active?: boolean; outlet?: string;
-};
-type Ingredient = {
-  id: string; name: string; unit: string;
-  stock: number; min?: number; outlet?: string;
-};
-type CartItem = {
-  id: string; productId: string; name: string; price: number; qty: number; note?: string;
-};
-type Shift = {
-  id: string; outlet: string; openBy: string; openAt: Timestamp;
-  closeAt?: Timestamp | null; openCash?: number; isOpen: boolean;
-};
+type Product = { id: string; name: string; price: number; category?: string; active?: boolean; outlet?: string };
+type Ingredient = { id: string; name: string; unit: string; stock: number; min?: number; outlet?: string };
+type CartItem = { id: string; productId: string; name: string; price: number; qty: number; note?: string };
+type Shift = { id: string; outlet: string; openBy: string; openAt: Timestamp; closeAt?: Timestamp | null; openCash?: number; isOpen: boolean };
 type Sale = {
   id?: string;
   outlet: string;
@@ -55,16 +42,16 @@ type Sale = {
    UTIL
 ========================== */
 const uid = () => Math.random().toString(36).slice(2, 10);
-const IDR = (n: number) =>
-  new Intl.NumberFormat("id-ID", {
-    style: "currency",
-    currency: "IDR",
-    maximumFractionDigits: 0,
-  }).format(n || 0);
-
+const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
+const dateKey = (d = new Date()) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,"0");
+  const dd = String(d.getDate()).padStart(2,"0");
+  return `${y}-${m}-${dd}`;
+};
 
 /* ==========================
    APP
@@ -75,15 +62,13 @@ export default function App() {
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<
-    "dashboard"|"pos"|"history"|"products"|"inventory"|"settings"
-  >("pos");
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
 
-  /* ---- login form ---- */
+  /* ---- login ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
 
-  /* ---- master ---- */
+  /* ---- master data ---- */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
@@ -114,18 +99,8 @@ export default function App() {
 
   /* ---- dashboard ---- */
   const [dashLoading, setDashLoading] = useState(false);
-  const [todayStats, setTodayStats] = useState({
-    omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0,
-    topItems: [] as {name:string;qty:number}[]
-  });
+  const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
-
-  /* ---- settings (local) ---- */
-  const [receiptLogoUrl, setReceiptLogoUrl] = useState<string>(() => localStorage.getItem("receipt_logo_url") || "");
-  const [receiptHeader, setReceiptHeader] = useState<string>(() => localStorage.getItem("receipt_header") || `CHAFU MATCHA — ${OUTLET}`);
-
-  useEffect(()=>{ localStorage.setItem("receipt_logo_url", receiptLogoUrl || ""); },[receiptLogoUrl]);
-  useEffect(()=>{ localStorage.setItem("receipt_header", receiptHeader || ""); },[receiptHeader]);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -174,9 +149,8 @@ export default function App() {
       setIngredients(rows);
     }, err=>alert("Memuat inventori gagal.\n"+(err.message||err)));
 
-    // shift
+    // shift + dashboard
     checkActiveShift().catch(e=>console.warn(e));
-    // dashboard awal
     loadDashboard().catch(()=>{});
 
     return ()=>{ unsubProd(); unsubIng(); };
@@ -200,10 +174,10 @@ export default function App() {
   async function doLogout(){ await signOut(auth); }
 
   /* ==========================
-     SHIFT (PATCHED)
+     SHIFT
   =========================== */
   async function checkActiveShift(){
-    try {
+    try{
       const qShift = query(
         collection(db,"shifts"),
         where("outlet","==",OUTLET),
@@ -219,51 +193,100 @@ export default function App() {
         id:d.id, outlet:x.outlet, openBy:x.openBy,
         openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
       });
-    } catch (e:any) {
-      console.error("checkActiveShift error:", e?.message||e);
-      alert(
-        "Gagal cek shift aktif.\nKemungkinan perlu Firestore index untuk koleksi 'shifts':\n" +
-        "outlet(ASC), isOpen(ASC), openAt(DESC)\n\n" + (e?.message||e)
-      );
-      setActiveShift(null);
+    }catch(e:any){
+      const msg = e?.message || String(e);
+      if (msg.includes("index")) {
+        alert(
+          "Gagal cek shift aktif.\nKemungkinan perlu Firestore index untuk koleksi 'shifts':\n" +
+          "outlet(ASC), isOpen(ASC), openAt(DESC)\n\n" + msg
+        );
+      } else {
+        alert("Gagal cek shift: " + msg);
+      }
     }
   }
 
   async function openShiftAction(){
     if(!user?.email) return alert("Belum login.");
-    try{
-      const id = `SHIFT-${Date.now()}`;
-      await setDoc(doc(db,"shifts", id), {
-        outlet: OUTLET,
-        openBy: user.email,
-        openAt: serverTimestamp(),
-        closeAt: null,
-        isOpen: true,
-        openCash: Number(openCash)||0
-      });
-      setOpenCash(0);
-      await checkActiveShift();
-      alert("Shift dibuka.");
-    }catch(e:any){
-      console.error("openShiftAction error:", e?.message||e);
-      alert("Gagal membuka shift: " + (e?.message||e));
-    }
+    const id = `SHIFT-${Date.now()}`;
+    await setDoc(doc(db,"shifts", id), {
+      outlet: OUTLET, openBy: user.email, openAt: serverTimestamp(),
+      closeAt: null, isOpen: true, openCash
+    });
+    setOpenCash(0);
+    await checkActiveShift();
   }
 
-  async function closeShiftAction(){
-    if(!activeShift?.id) return alert("Tidak ada shift aktif.");
-    try{
-      await updateDoc(doc(db,"shifts", activeShift.id), {
-        isOpen:false,
-        closeAt: serverTimestamp()
-      });
-      setActiveShift(null);
-      alert("Shift ditutup.");
-      loadDashboard().catch(()=>{});
-    }catch(e:any){
-      console.error("closeShiftAction error:", e?.message||e);
-      alert("Gagal menutup shift: " + (e?.message||e));
-    }
+  // REKAP & TUTUP SHIFT (baru)
+  async function closeShiftAction() {
+    if (!activeShift?.id) return;
+
+    const closeAt = serverTimestamp();
+    await updateDoc(doc(db, "shifts", activeShift.id), { isOpen: false, closeAt });
+
+    // kumpulkan sales shift ini
+    const qs = query(
+      collection(db, "sales"),
+      where("outlet", "==", OUTLET),
+      where("shiftId", "==", activeShift.id)
+    );
+    const snap = await getDocs(qs);
+
+    let gross = 0, trx = 0, cashSum = 0, ewSum = 0, qrisSum = 0;
+    let tax = 0, service = 0, discount = 0;
+
+    snap.docs.forEach(d => {
+      const x = d.data() as any;
+      trx += 1;
+      gross += x.total || 0;
+      tax += x.tax || 0;
+      service += x.service || 0;
+      discount += x.discount || 0;
+      if (x.payMethod === "cash") cashSum += x.total || 0;
+      else if (x.payMethod === "ewallet") ewSum += x.total || 0;
+      else if (x.payMethod === "qris") qrisSum += x.total || 0;
+    });
+
+    // tulis shift_reports
+    await setDoc(doc(db, "shift_reports", activeShift.id), {
+      outlet: OUTLET,
+      shiftId: activeShift.id,
+      openBy: activeShift.openBy,
+      openAt: activeShift.openAt || null,
+      closeAt,
+      openCash: activeShift.openCash || 0,
+      totals: { gross, trx, cash: cashSum, ewallet: ewSum, qris: qrisSum, tax, service, discount },
+      dateKey: dateKey(),
+      createdAt: serverTimestamp()
+    }, { merge: true });
+
+    // akumulasi harian
+    const dailyRef = doc(db, "reports_daily", `${OUTLET}_${dateKey()}`);
+    const prev = await getDoc(dailyRef);
+    const p: any = prev.exists() ? prev.data() : {};
+    await setDoc(dailyRef, {
+      outlet: OUTLET,
+      dateKey: dateKey(),
+      gross: (p.gross || 0) + gross,
+      trx: (p.trx || 0) + trx,
+      cash: (p.cash || 0) + cashSum,
+      ewallet: (p.ewallet || 0) + ewSum,
+      qris: (p.qris || 0) + qrisSum,
+      tax: (p.tax || 0) + tax,
+      service: (p.service || 0) + service,
+      discount: (p.discount || 0) + discount,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+
+    setActiveShift(null);
+    alert(
+      `Shift ditutup.\n\n` +
+      `Transaksi: ${trx}\n` +
+      `Omzet : ${IDR(gross)}\n` +
+      `Cash : ${IDR(cashSum)} | eWallet : ${IDR(ewSum)} | QRIS : ${IDR(qrisSum)}`
+    );
+
+    loadDashboard().catch(() => {});
   }
 
   /* ==========================
@@ -279,13 +302,9 @@ export default function App() {
   const inc = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:ci.qty+1 } : ci));
   const dec = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:Math.max(1, ci.qty-1) } : ci));
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
-  const clearCart = ()=> {
-    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0);
-    setPayMethod("cash"); setCash(0); setNoteInput("");
-    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
-  };
+  const clearCart = ()=> { setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput(""); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); };
 
-  /* loyalty: auto lookup by phone */
+  // loyalty: auto lookup by phone
   useEffect(()=>{
     if(!user) return;
     const phone = customerPhone.trim();
@@ -298,24 +317,17 @@ export default function App() {
           const c = s.data() as any;
           setCustomerName(c.name||""); setCustomerPoints(c.points||0);
         }else{
-          setCustomerPoints(0); // pelanggan baru
+          setCustomerPoints(0);
         }
       }catch(e:any){ console.warn("Lookup customer:", e?.message||e); }
     })();
   },[customerPhone, user]);
 
-  /* print 80mm */
+  // print 80mm
   function printReceipt(rec: Omit<Sale,"id">, saleId?: string){
-    const itemsHtml = rec.items.map(i=>
-      `<tr>
-        <td>${i.name}${i.note?`<div style='font-size:10px;opacity:.7'>${i.note}</div>`:""}</td>
-        <td style='text-align:center'>${i.qty}x</td>
-        <td style='text-align:right'>${IDR(i.price*i.qty)}</td>
-      </tr>`).join("");
-
+    const itemsHtml = rec.items.map(i=>`<tr><td>${i.name}${i.note?`<div style='font-size:10px;opacity:.7'>${i.note}</div>`:""}</td><td style='text-align:center'>${i.qty}x</td><td style='text-align:right'>${IDR(i.price*i.qty)}</td></tr>`).join("");
     const w = window.open("", "_blank", "width=380,height=600");
     if(!w) return;
-
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>Struk</title>
 <style>
 body{font-family:ui-monospace,Consolas,monospace}
@@ -324,21 +336,19 @@ h2{margin:6px 0;text-align:center}
 td{padding:4px 0;border-bottom:1px dashed #ccc;font-size:12px}
 .tot td{border-bottom:none;font-weight:700}
 .meta{font-size:12px;text-align:center;opacity:.8}
-img.logo{display:block;margin:0 auto 6px;max-height:42px}
-img.qr{display:block;margin:6px auto;height:120px}
+img{display:block;margin:0 auto 6px;height:42px}
 </style></head><body>
 <div class="wrap">
-  ${receiptLogoUrl ? `<img class="logo" src="${receiptLogoUrl}" onerror="this.style.display='none'"/>` : ""}
-  <h2>${receiptHeader || `CHAFU MATCHA — ${OUTLET}`}</h2>
+  ${rec.payMethod!=="cash" ? `<img src="${QRIS_IMG_SRC}" onerror="this.style.display='none'"/>` : ""}
+  <h2>CHAFU MATCHA — ${OUTLET}</h2>
   <div class="meta">${saleId||"DRAFT"}<br/>${new Date().toLocaleString("id-ID",{hour12:false})}</div>
-  ${rec.payMethod!=="cash" ? `<img class="qr" src="${QRIS_IMG_SRC}" onerror="this.style.display='none'"/>` : ""}
   <hr/>
   <table style="width:100%;border-collapse:collapse">
     ${itemsHtml}
     <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${IDR(rec.subtotal)}</td></tr>
-    ${rec.tax?`<tr class="tot"><td>Pajak</td><td></td><td style='text-align:right'>${IDR(rec.tax)}</td></tr>`:""}
-    ${rec.service?`<tr class="tot"><td>Service</td><td></td><td style='text-align:right'>${IDR(rec.service)}</td></tr>`:""}
-    ${rec.discount?`<tr class="tot"><td>Diskon</td><td></td><td style='text-align:right'>-${IDR(rec.discount)}</td></tr>`:""}
+    ${rec.tax?`<tr class="tot"><td>Pajak</td><td></td><td style="text-align:right">${IDR(rec.tax)}</td></tr>`:""}
+    ${rec.service?`<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(rec.service)}</td></tr>`:""}
+    ${rec.discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(rec.discount)}</td></tr>`:""}
     <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(rec.total)}</td></tr>
     ${rec.payMethod==="cash"
       ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(rec.cash||0)}</td></tr>
@@ -353,7 +363,7 @@ img.qr{display:block;margin:6px auto;height:120px}
     w.document.write(html); w.document.close();
   }
 
-  /* finalize */
+  // finalize
   async function finalize(){
     if(!user?.email) return alert("Belum login.");
     if(!activeShift?.id) return alert("Buka shift dahulu.");
@@ -372,15 +382,17 @@ img.qr{display:block;margin:6px auto;height:120px}
     try{
       const ref = await addDoc(collection(db,"sales"), payload as any);
 
-      // loyalty (atomic)
+      // loyalty
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
-        await setDoc(cref, {
-          phone: customerPhone.trim(),
-          name: customerName || "Member",
-          points: increment(Math.floor(total/10000)),
-          lastVisit: serverTimestamp(),
-        }, { merge: true });
+        const s = await getDoc(cref);
+        const pts = Math.floor(total/10000); // 10rb=1 poin
+        if(s.exists()){
+          const c = s.data() as any;
+          await updateDoc(cref, { points:(c.points||0)+pts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
+        }else{
+          await setDoc(cref, { phone: customerPhone.trim(), name: customerName||"Member", points: pts, lastVisit: serverTimestamp() });
+        }
       }
 
       printReceipt(payload, ref.id);
@@ -420,7 +432,7 @@ img.qr{display:block;margin:6px auto;height:120px}
       setHistCursor(snap.docs.length? snap.docs[snap.docs.length-1] : null);
     }catch(e:any){
       if(String(e?.message||"").includes("index")){
-        alert("Riwayat butuh Firestore index.\nBuat index: sales → outlet(ASC), time(DESC)");
+        alert("Riwayat butuh Firestore index.\nBuat index: sales → outlet(ASC), time(DESC)\n\n"+e.message);
       }else{
         alert("Gagal memuat riwayat: "+(e?.message||e));
       }
@@ -428,7 +440,7 @@ img.qr{display:block;margin:6px auto;height:120px}
   }
 
   /* ==========================
-     DASHBOARD OWNER
+     DASHBOARD
   =========================== */
   async function loadDashboard(){
     if(!isOwner) return;
@@ -460,7 +472,6 @@ img.qr{display:block;margin:6px auto;height:120px}
         .map(([name,qty])=>({name,qty}))
         .sort((a,b)=>b.qty-a.qty)
         .slice(0,5);
-
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
       // 7 hari terakhir
@@ -516,8 +527,26 @@ img.qr{display:block;margin:6px auto;height:120px}
     }, { merge:true });
   }
 
+  // ====== Modal Edit Produk ======
+  const [editingProduct, setEditingProduct] = useState<null | {
+    id?: string; name: string; price: number; category?: string; active?: boolean;
+  }>(null);
+  function startAddProduct(){ setEditingProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true }); }
+  function startEditProduct(p: Product){ setEditingProduct({ id:p.id, name:p.name, price:p.price, category:p.category||"Signature", active:p.active!==false }); }
+  async function saveEditingProduct(){
+    if(!editingProduct) return;
+    await upsertProduct({
+      id: editingProduct.id,
+      name: editingProduct.name.trim() || "Produk",
+      price: Number(editingProduct.price) || 0,
+      category: editingProduct.category || "Signature",
+      active: editingProduct.active !== false
+    });
+    setEditingProduct(null);
+  }
+
   /* ==========================
-     UI: LOGIN
+     UI
   =========================== */
   if(!user){
     return (
@@ -541,9 +570,6 @@ img.qr{display:block;margin:6px auto;height:120px}
     );
   }
 
-  /* ==========================
-     UI: MAIN
-  =========================== */
   return (
     <div className="min-h-screen bg-neutral-50">
       {/* Topbar */}
@@ -556,13 +582,12 @@ img.qr{display:block;margin:6px auto;height:120px}
               <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
             </div>
           </div>
-          <nav className="flex gap-2 flex-wrap">
+          <nav className="flex gap-2">
             {isOwner && <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Dashboard</button>}
             <button onClick={()=>setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Kasir</button>
             <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
             {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
             {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
-            {isOwner && <button onClick={()=>setTab("settings")} className={`px-3 py-1.5 rounded-lg border ${tab==="settings"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Pengaturan</button>}
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
@@ -591,6 +616,7 @@ img.qr{display:block;margin:6px auto;height:120px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
+            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -599,6 +625,7 @@ img.qr{display:block;margin:6px auto;height:120px}
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
 
+            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -796,7 +823,7 @@ img.qr{display:block;margin:6px auto;height:120px}
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
+              <button className="px-3 py-2 rounded-lg border" onClick={startAddProduct}>+ Tambah</button>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -808,7 +835,7 @@ img.qr{display:block;margin:6px auto;height:120px}
                       <td>{p.category||"-"}</td>
                       <td className="text-right">{IDR(p.price)}</td>
                       <td className="text-right">
-                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>upsertProduct({ id:p.id, name:p.name+" *", price:p.price, category:p.category, active:p.active })}>Edit</button>
+                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>startEditProduct(p)}>Edit</button>
                         <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
                       </td>
                     </tr>
@@ -844,33 +871,6 @@ img.qr{display:block;margin:6px auto;height:120px}
             </div>
           </section>
         )}
-
-        {/* SETTINGS (owner only) */}
-        {tab==="settings" && isOwner && (
-          <section className="bg-white rounded-2xl border p-3 space-y-3">
-            <h2 className="text-lg font-semibold">Pengaturan Struk</h2>
-            <label className="block">
-              <div className="text-sm mb-1">Logo Struk (URL gambar)</div>
-              <input
-                className="border rounded-lg px-3 py-2 w-full"
-                placeholder="https://….png"
-                value={receiptLogoUrl}
-                onChange={e=>setReceiptLogoUrl(e.target.value)}
-              />
-            </label>
-            <label className="block">
-              <div className="text-sm mb-1">Header Struk</div>
-              <input
-                className="border rounded-lg px-3 py-2 w-full"
-                value={receiptHeader}
-                onChange={e=>setReceiptHeader(e.target.value)}
-              />
-            </label>
-            <div className="text-xs text-neutral-500">
-              Pengaturan disimpan lokal di perangkat (localStorage). Untuk semua kasir, set di tiap device atau nanti bisa kita pindah ke Firestore.
-            </div>
-          </section>
-        )}
       </main>
 
       {/* Modal QR */}
@@ -879,6 +879,56 @@ img.qr{display:block;margin:6px auto;height:120px}
           <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
             <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
             <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Edit/Tambah Produk */}
+      {editingProduct && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center" onClick={() => setEditingProduct(null)}>
+          <div className="bg-white rounded-2xl p-4 w-[92vw] max-w-md" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-3">{editingProduct.id ? "Edit Produk" : "Produk Baru"}</h3>
+            <div className="space-y-2">
+              <label className="block text-sm">
+                <span>Nama</span>
+                <input
+                  className="mt-1 w-full border rounded-lg px-3 py-2"
+                  type="text"
+                  value={editingProduct.name}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, name: e.target.value })}
+                />
+              </label>
+              <label className="block text-sm">
+                <span>Harga</span>
+                <input
+                  className="mt-1 w-full border rounded-lg px-3 py-2"
+                  type="number"
+                  value={editingProduct.price}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, price: Number(e.target.value) || 0 })}
+                />
+              </label>
+              <label className="block text-sm">
+                <span>Kategori</span>
+                <input
+                  className="mt-1 w-full border rounded-lg px-3 py-2"
+                  type="text"
+                  value={editingProduct.category || ""}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, category: e.target.value })}
+                />
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={editingProduct.active !== false}
+                  onChange={(e) => setEditingProduct({ ...editingProduct, active: e.target.checked })}
+                />
+                Aktif
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className="px-3 py-2 rounded-lg border" onClick={() => setEditingProduct(null)}>Batal</button>
+              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={saveEditingProduct}>Simpan</button>
+            </div>
           </div>
         </div>
       )}
