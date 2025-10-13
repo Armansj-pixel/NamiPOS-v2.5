@@ -1,21 +1,21 @@
-// src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query,
-  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter
+  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter,
+  deleteDoc
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
 
 /* ==========================
-   KONFIGURASI
+   KONFIG
 ========================== */
 const OUTLET = "MTHaryono";
 const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const QRIS_IMG_SRC = "/qris.png"; // taruh file di public/qris.png
+const QRIS_IMG_SRC = "/qris.png"; // /public/qris.png
 
 /* ==========================
    TYPES
@@ -37,16 +37,6 @@ type Sale = {
   payMethod: "cash" | "ewallet" | "qris";
   cash?: number; change?: number;
 };
-type DailyReport = {
-  outlet: string;
-  date: string; // YYYY-MM-DD
-  omzet: number;
-  trx: number;
-  cash: number;
-  ewallet: number;
-  qris: number;
-  items: { name: string; qty: number; total: number }[];
-};
 
 /* ==========================
    UTIL
@@ -56,8 +46,6 @@ const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",curre
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
-const d2 = (n:number)=> String(n).padStart(2,"0");
-const dateKey = (d: Date)=> `${d.getFullYear()}-${d2(d.getMonth()+1)}-${d2(d.getDate())}`;
 
 /* ==========================
    APP
@@ -68,7 +56,7 @@ export default function App() {
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory"|"settings">("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
@@ -108,10 +96,12 @@ export default function App() {
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
-  // Laporan Harian
-  const [dailyDate, setDailyDate] = useState(dateKey(new Date()));
-  const [daily, setDaily] = useState<DailyReport | null>(null);
-  const [dailyLoading, setDailyLoading] = useState(false);
+  /* ---- products form/edit ---- */
+  const [newProd, setNewProd] = useState({ name: "", category: "Signature", price: 10000, active: true });
+  const [editProd, setEditProd] = useState<Product | null>(null);
+
+  /* ---- inventory form ---- */
+  const [newIng, setNewIng] = useState({ name: "", unit: "pcs", stock: 0, min: 0 });
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -164,8 +154,6 @@ export default function App() {
     checkActiveShift().catch(e=>console.warn(e));
     // dashboard awal
     loadDashboard().catch(()=>{});
-    // laporan harian awal
-    loadDailyReport(dateKey(new Date())).catch(()=>{});
 
     return ()=>{ unsubProd(); unsubIng(); };
     // eslint-disable-next-line
@@ -208,7 +196,8 @@ export default function App() {
         openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
       });
     }catch(e:any){
-      alert("Gagal cek shift aktif.\n" + (e?.message || e));
+      const msg = e?.message||String(e);
+      alert("Gagal cek shift aktif.\n"+msg);
     }
   }
 
@@ -226,47 +215,21 @@ export default function App() {
   async function closeShiftAction(){
     if(!activeShift?.id) return;
     try{
-      // hitung ringkasan hari ini (untuk rekap harian)
-      const today = dateKey(new Date());
-      const qToday = query(
-        collection(db,"sales"),
+      // rekap singkat untuk pesan (opsional)
+      const qSales = query(collection(db,"sales"),
         where("outlet","==",OUTLET),
-        where("time", ">=", Timestamp.fromDate(startOfDay())),
-        where("time", "<=", Timestamp.fromDate(endOfDay()))
+        where("shiftId","==",activeShift.id)
       );
-      const sToday = await getDocs(qToday);
-      let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
-      const itemsMap = new Map<string, {qty:number,total:number}>();
-      sToday.docs.forEach(d=>{
-        const x = d.data() as any;
-        omzet += x.total||0; trx += 1;
-        if(x.payMethod==="cash") cashSum += x.total||0;
-        if(x.payMethod==="ewallet") ew += x.total||0;
-        if(x.payMethod==="qris") qr += x.total||0;
-        (x.items||[]).forEach((it:any)=>{
-          const cur = itemsMap.get(it.name) || {qty:0,total:0};
-          cur.qty += it.qty||0; cur.total += (it.price||0)*(it.qty||0);
-          itemsMap.set(it.name, cur);
-        });
-      });
-      const items = Array.from(itemsMap.entries()).map(([name,v])=>({ name, qty:v.qty, total:v.total }));
+      const s = await getDocs(qSales);
+      let total=0, trx=0;
+      s.docs.forEach(d=>{ const x=d.data() as any; total+=x.total||0; trx++; });
 
-      await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
-
-      // tulis / merge laporan harian
-      await setDoc(doc(db,"reports_daily", `${OUTLET}_${today}`), {
-        outlet: OUTLET, date: today,
-        omzet, trx, cash: cashSum, ewallet: ew, qris: qr,
-        items
-      }, { merge: true });
-
+      await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp(), total, trx });
       setActiveShift(null);
-      alert("Shift ditutup & laporan harian diperbarui.");
-      // refresh dashboard & daily panel
+      alert(`Shift ditutup.\nTransaksi: ${trx}\nTotal: ${IDR(total)}`);
       loadDashboard().catch(()=>{});
-      loadDailyReport(today).catch(()=>{});
     }catch(e:any){
-      alert("Tutup shift gagal.\n" + (e?.message || e));
+      alert("Tutup shift gagal.\n"+(e?.message||e));
     }
   }
 
@@ -298,7 +261,7 @@ export default function App() {
           const c = s.data() as any;
           setCustomerName(c.name||""); setCustomerPoints(c.points||0);
         }else{
-          setCustomerPoints(0); // pelanggan baru
+          setCustomerPoints(0);
         }
       }catch(e:any){ console.warn("Lookup customer:", e?.message||e); }
     })();
@@ -367,7 +330,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
         const s = await getDoc(cref);
-        const pts = Math.floor(total/10000); // contoh: 10rb = 1 poin
+        const pts = Math.floor(total/10000);
         if(s.exists()){
           const c = s.data() as any;
           await updateDoc(cref, { points:(c.points||0)+pts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
@@ -379,7 +342,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       printReceipt(payload, ref.id);
       clearCart();
       if(tab==="history") loadHistory(false);
-      if(isOwner) { loadDashboard().catch(()=>{}); loadDailyReport(dateKey(new Date())).catch(()=>{}); }
+      if(isOwner && tab==="dashboard") loadDashboard().catch(()=>{});
 
     }catch(err:any){
       alert("Transaksi gagal disimpan: "+(err?.message||err));
@@ -412,7 +375,8 @@ img{display:block;margin:0 auto 6px;height:42px}
       setHistoryRows(prev=> append? [...prev, ...rows] : rows);
       setHistCursor(snap.docs.length? snap.docs[snap.docs.length-1] : null);
     }catch(e:any){
-      if(String(e?.message||"").includes("index")){
+      const msg = String(e?.message||"");
+      if(msg.includes("index")){
         alert("Riwayat butuh Firestore index.\nBuat index: sales → outlet(ASC), time(DESC)\n\n"+e.message);
       }else{
         alert("Gagal memuat riwayat: "+(e?.message||e));
@@ -485,94 +449,6 @@ img{display:block;margin:0 auto 6px;height:42px}
     }
   }
 
-  // === Laporan Harian ===
-  async function loadDailyReport(dateStr = dailyDate) {
-    if (!isOwner) return;
-    setDailyLoading(true);
-    try {
-      const id = `${OUTLET}_${dateStr}`;
-      const s = await getDoc(doc(db, "reports_daily", id));
-      if (s.exists()) {
-        const x = s.data() as any;
-        const rep: DailyReport = {
-          outlet: x.outlet,
-          date: x.date || dateStr,
-          omzet: x.omzet || 0,
-          trx: x.trx || 0,
-          cash: x.cash || 0,
-          ewallet: x.ewallet || 0,
-          qris: x.qris || 0,
-          items: (x.items || []).map((it: any) => ({
-            name: it.name, qty: it.qty || 0, total: it.total || 0
-          }))
-        };
-        setDaily(rep);
-      } else {
-        setDaily(null);
-      }
-    } catch (e:any) {
-      alert("Gagal memuat laporan harian: " + (e.message || e));
-    } finally {
-      setDailyLoading(false);
-    }
-  }
-  function exportDailyCSV() {
-    if (!daily) return;
-    const lines = [
-      `Outlet,${daily.outlet}`,
-      `Tanggal,${daily.date}`,
-      `Omzet,${daily.omzet}`,
-      `Transaksi,${daily.trx}`,
-      `Cash,${daily.cash}`,
-      `eWallet,${daily.ewallet}`,
-      `QRIS,${daily.qris}`,
-      "",
-      "Nama Item,Qty,Total"
-    ];
-    for (const it of daily.items) {
-      lines.push(`"${it.name.replaceAll('"','""')}",${it.qty},${it.total}`);
-    }
-    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `laporan_${daily.outlet}_${daily.date}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-  function printDaily() {
-    if (!daily) return;
-    const rows = daily.items
-      .map(it => `<tr><td>${it.name}</td><td style="text-align:right">${it.qty}</td><td style="text-align:right">${IDR(it.total)}</td></tr>`)
-      .join("");
-    const w = window.open("", "_blank", "width=700,height=800");
-    if (!w) return;
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Laporan ${daily.date}</title>
-    <style>
-    body{font-family:ui-sans-serif,system-ui; padding:16px}
-    h2{margin:8px 0}
-    table{width:100%; border-collapse:collapse}
-    th,td{padding:6px 4px; border-bottom:1px solid #eee; font-size:13px}
-    .kpi{display:flex; gap:12px; margin:10px 0}
-    .kpi div{padding:8px 10px; border:1px solid #eee; border-radius:8px}
-    </style></head><body>
-    <h2>Laporan Harian — ${daily.outlet}</h2>
-    <div>Tanggal: <b>${daily.date}</b></div>
-    <div class="kpi">
-      <div>Omzet: <b>${IDR(daily.omzet)}</b></div>
-      <div>Transaksi: <b>${daily.trx}</b></div>
-      <div>Cash: <b>${IDR(daily.cash)}</b></div>
-      <div>eWallet: <b>${IDR(daily.ewallet)}</b></div>
-      <div>QRIS: <b>${IDR(daily.qris)}</b></div>
-    </div>
-    <table>
-      <thead><tr><th>Menu</th><th style="text-align:right">Qty</th><th style="text-align:right">Total</th></tr></thead>
-      <tbody>${rows || `<tr><td colspan="3">Belum ada data</td></tr>`}</tbody>
-    </table>
-    <script>window.print();</script>
-    </body></html>`);
-    w.document.close();
-  }
-
   /* ==========================
      OWNER: PRODUCTS & INVENTORY
   =========================== */
@@ -584,10 +460,52 @@ img{display:block;margin:0 auto 6px;height:42px}
       category: p.category||"Signature", active: p.active!==false
     }, { merge:true });
   }
-  async function deactivateProduct(id:string){
-    if(!isOwner) return alert("Akses khusus owner.");
-    await updateDoc(doc(db,"products", id), { active:false });
+
+  function resetNewProd(){ setNewProd({ name: "", category: "Signature", price: 10000, active: true }); }
+  function startEditProd(p: Product){ setEditProd({...p}); }
+  function cancelEditProd(){ setEditProd(null); }
+  async function saveEditProd(){
+    try{
+      if(!isOwner || !editProd) return;
+      if(!editProd.name.trim()) return alert("Nama produk wajib diisi.");
+      await upsertProduct({
+        id: editProd.id,
+        name: editProd.name.trim(),
+        category: editProd.category || "Signature",
+        price: Number(editProd.price)||0,
+        active: editProd.active!==false
+      });
+      setEditProd(null);
+    }catch(e:any){ alert("Gagal menyimpan produk: "+(e?.message||e)); }
   }
+  async function handleAddProduct(){
+    try{
+      if(!isOwner) return;
+      if(!newProd.name.trim()) return alert("Nama produk wajib diisi.");
+      await upsertProduct({
+        name: newProd.name.trim(),
+        category: newProd.category || "Signature",
+        price: Number(newProd.price)||0,
+        active: newProd.active!==false
+      });
+      resetNewProd();
+    }catch(e:any){ alert("Tambah produk gagal: "+(e?.message||e)); }
+  }
+  async function deactivateProductSafe(id:string){
+    try{
+      if(!isOwner) return alert("Akses khusus owner.");
+      if(!confirm("Nonaktifkan produk ini?")) return;
+      await updateDoc(doc(db,"products", id), { active:false });
+    }catch(e:any){ alert("Nonaktifkan produk gagal: "+(e?.message||e)); }
+  }
+  async function deleteProductHard(id:string){
+    try{
+      if(!isOwner) return alert("Akses khusus owner.");
+      if(!confirm("Hapus PERMANEN produk ini?")) return;
+      await deleteDoc(doc(db,"products", id));
+    }catch(e:any){ alert("Hapus produk gagal: "+(e?.message||e)); }
+  }
+
   async function upsertIngredient(i: Partial<Ingredient> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = i.id || uid();
@@ -595,6 +513,20 @@ img{display:block;margin:0 auto 6px;height:42px}
       outlet: OUTLET, name:i.name||"Bahan", unit:i.unit||"pcs",
       stock: Number(i.stock)||0, min: Number(i.min)||0
     }, { merge:true });
+  }
+  async function handleAddIngredient(){
+    try{
+      if(!newIng.name.trim()) return alert("Nama bahan wajib diisi.");
+      await upsertIngredient({
+        name: newIng.name.trim(),
+        unit: newIng.unit || "pcs",
+        stock: Number(newIng.stock)||0,
+        min: Number(newIng.min)||0
+      });
+      setNewIng({ name:"", unit:"pcs", stock:0, min:0 });
+    }catch(e:any){
+      alert("Tambah inventori gagal: " + (e?.message||e));
+    }
   }
 
   /* ==========================
@@ -640,6 +572,7 @@ img{display:block;margin:0 auto 6px;height:42px}
             <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
             {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
             {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
+            {isOwner && <button onClick={()=>setTab("settings")} className={`px-3 py-1.5 rounded-lg border ${tab==="settings"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Pengaturan</button>}
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
@@ -668,7 +601,6 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
-            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -677,7 +609,6 @@ img{display:block;margin:0 auto 6px;height:42px}
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
 
-            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -708,60 +639,6 @@ img{display:block;margin:0 auto 6px;height:42px}
                   ))}
                 </div>
               </div>
-            </div>
-
-            {/* === Laporan Harian === */}
-            <div className="bg-white border rounded-2xl p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="font-semibold">Laporan Harian</div>
-                <div className="flex gap-2 items-center">
-                  <input
-                    type="date"
-                    className="border rounded-lg px-2 py-1"
-                    value={dailyDate}
-                    onChange={(e)=>{ setDailyDate(e.target.value); loadDailyReport(e.target.value); }}
-                  />
-                  <button className="px-3 py-1.5 rounded-lg border" onClick={()=>loadDailyReport()}>Muat</button>
-                  <button className="px-3 py-1.5 rounded-lg border" onClick={exportDailyCSV} disabled={!daily}>Export CSV</button>
-                  <button className="px-3 py-1.5 rounded-lg border" onClick={printDaily} disabled={!daily}>Print</button>
-                </div>
-              </div>
-
-              {dailyLoading && <div className="text-sm text-neutral-500">Memuat…</div>}
-              {!dailyLoading && !daily && <div className="text-sm text-neutral-500">Belum ada laporan pada tanggal ini.</div>}
-
-              {!!daily && (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
-                    <KPI title="Omzet" value={IDR(daily.omzet)} />
-                    <KPI title="Transaksi" value={String(daily.trx)} />
-                    <KPI title="Cash" value={IDR(daily.cash)} />
-                    <KPI title="eWallet" value={IDR(daily.ewallet)} />
-                    <KPI title="QRIS" value={IDR(daily.qris)} />
-                    <KPI title="Avg Ticket" value={daily.trx? IDR(Math.round(daily.omzet/daily.trx)) : "Rp 0"} />
-                  </div>
-                  <div className="overflow-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-left border-b">
-                          <th className="py-2">Menu</th>
-                          <th className="text-right">Qty</th>
-                          <th className="text-right">Total</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {daily.items.map((it,i)=>(
-                          <tr key={i} className="border-b">
-                            <td className="py-2">{it.name}</td>
-                            <td className="text-right">{it.qty}</td>
-                            <td className="text-right">{IDR(it.total)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
             </div>
           </section>
         )}
@@ -927,25 +804,83 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* PRODUCTS */}
         {tab==="products" && isOwner && (
           <section className="bg-white rounded-2xl border p-3">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
+            <h2 className="text-lg font-semibold mb-3">Manajemen Produk</h2>
+
+            {/* Form tambah produk */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 mb-3">
+              <input className="md:col-span-4 border rounded-lg px-3 py-2" placeholder="Nama produk" value={newProd.name} onChange={(e)=>setNewProd(v=>({...v, name:e.target.value}))}/>
+              <input className="md:col-span-3 border rounded-lg px-3 py-2" placeholder="Kategori (ex: Signature)" value={newProd.category} onChange={(e)=>setNewProd(v=>({...v, category:e.target.value}))}/>
+              <input type="number" className="md:col-span-3 border rounded-lg px-3 py-2" placeholder="Harga" value={newProd.price} onChange={(e)=>setNewProd(v=>({...v, price:Number(e.target.value)||0}))}/>
+              <div className="md:col-span-2 flex items-center gap-2">
+                <label className="text-sm flex items-center gap-2">
+                  <input type="checkbox" checked={newProd.active} onChange={(e)=>setNewProd(v=>({...v, active:e.target.checked}))}/>
+                  Aktif
+                </label>
+                <button onClick={handleAddProduct} className="ml-auto px-3 py-2 rounded-lg bg-emerald-600 text-white">+ Tambah</button>
+              </div>
             </div>
+
+            {/* Tabel produk */}
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr></thead>
+                <thead>
+                  <tr className="text-left border-b">
+                    <th className="py-2">Nama</th>
+                    <th>Kategori</th>
+                    <th className="text-right">Harga</th>
+                    <th className="text-right">Status</th>
+                    <th className="text-right">Aksi</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {products.map(p=>(
-                    <tr key={p.id} className="border-b">
-                      <td className="py-2">{p.name}</td>
-                      <td>{p.category||"-"}</td>
-                      <td className="text-right">{IDR(p.price)}</td>
-                      <td className="text-right">
-                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>upsertProduct({ id:p.id, name:p.name+" *", price:p.price, category:p.category, active:p.active })}>Edit</button>
-                        <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
-                      </td>
-                    </tr>
-                  ))}
+                  {products.map(p=>{
+                    const editing = editProd?.id === p.id;
+                    return (
+                      <tr key={p.id} className="border-b">
+                        <td className="py-2">
+                          {editing ? (
+                            <input className="border rounded px-2 py-1 w-full" value={editProd!.name} onChange={(e)=>setEditProd(v=>v?{...v, name:e.target.value}:v)}/>
+                          ) : p.name}
+                        </td>
+                        <td>
+                          {editing ? (
+                            <input className="border rounded px-2 py-1" value={editProd!.category || ""} onChange={(e)=>setEditProd(v=>v?{...v, category:e.target.value}:v)}/>
+                          ) : (p.category || "-")}
+                        </td>
+                        <td className="text-right">
+                          {editing ? (
+                            <input type="number" className="border rounded px-2 py-1 w-28 text-right" value={editProd!.price} onChange={(e)=>setEditProd(v=>v?{...v, price:Number(e.target.value)||0}:v)}/>
+                          ) : IDR(p.price)}
+                        </td>
+                        <td className="text-right">
+                          {editing ? (
+                            <label className="text-sm">
+                              <input type="checkbox" className="mr-2" checked={editProd!.active !== false} onChange={(e)=>setEditProd(v=>v?{...v, active:e.target.checked}:v)}/>
+                              {editProd!.active !== false ? "Aktif" : "Nonaktif"}
+                            </label>
+                          ) : (
+                            <span className={`px-2 py-0.5 rounded text-xs ${p.active!==false?'bg-emerald-50 text-emerald-700':'bg-neutral-100 text-neutral-600'}`}>
+                              {p.active!==false ? "Aktif" : "Nonaktif"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="text-right">
+                          {editing ? (
+                            <div className="flex justify-end gap-2">
+                              <button onClick={saveEditProd} className="px-2 py-1 border rounded bg-emerald-50">Simpan</button>
+                              <button onClick={cancelEditProd} className="px-2 py-1 border rounded">Batal</button>
+                            </div>
+                          ) : (
+                            <div className="flex justify-end gap-2">
+                              <button onClick={()=>startEditProd(p)} className="px-2 py-1 border rounded">Edit</button>
+                              <button onClick={()=>deactivateProductSafe(p.id)} className="px-2 py-1 border rounded">Nonaktifkan</button>
+                              <button onClick={()=>deleteProductHard(p.id)} className="px-2 py-1 border rounded text-rose-600">Hapus</button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
               {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
@@ -956,25 +891,44 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* INVENTORY */}
         {tab==="inventory" && isOwner && (
           <section className="bg-white rounded-2xl border p-3">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-semibold">Inventori</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertIngredient({ name:"Bahan Baru", unit:"pcs", stock:0, min:0 })}>+ Tambah</button>
+            <h2 className="text-lg font-semibold mb-3">Inventori</h2>
+
+            {/* Form tambah bahan */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2 mb-3">
+              <input className="md:col-span-4 border rounded-lg px-3 py-2" placeholder="Nama bahan" value={newIng.name} onChange={(e)=>setNewIng(v=>({...v, name:e.target.value}))}/>
+              <input className="md:col-span-2 border rounded-lg px-3 py-2" placeholder="Satuan (ex: gr / ml / pcs)" value={newIng.unit} onChange={(e)=>setNewIng(v=>({...v, unit:e.target.value}))}/>
+              <input type="number" className="md:col-span-3 border rounded-lg px-3 py-2" placeholder="Stok awal" value={newIng.stock} onChange={(e)=>setNewIng(v=>({...v, stock:Number(e.target.value)||0}))}/>
+              <input type="number" className="md:col-span-2 border rounded-lg px-3 py-2" placeholder="Min. stok" value={newIng.min} onChange={(e)=>setNewIng(v=>({...v, min:Number(e.target.value)||0}))}/>
+              <div className="md:col-span-1 flex items-center">
+                <button onClick={handleAddIngredient} className="px-3 py-2 rounded-lg bg-emerald-600 text-white w-full">+ Tambah</button>
+              </div>
             </div>
+
+            {/* Tabel bahan */}
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th></tr></thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Min</th></tr></thead>
                 <tbody>
                   {ingredients.map(i=>(
                     <tr key={i.id} className="border-b">
                       <td className="py-2">{i.name}</td>
                       <td>{i.unit}</td>
                       <td className="text-right">{i.stock}</td>
+                      <td className="text-right">{i.min ?? 0}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
               {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
             </div>
+          </section>
+        )}
+
+        {/* SETTINGS (placeholder) */}
+        {tab==="settings" && isOwner && (
+          <section className="bg-white rounded-2xl border p-3">
+            <h2 className="text-lg font-semibold mb-2">Pengaturan</h2>
+            <p className="text-sm text-neutral-600">Tempat atur pajak default, service, printer, dsb (coming soon).</p>
           </section>
         )}
       </main>
