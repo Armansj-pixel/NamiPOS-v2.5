@@ -15,7 +15,7 @@ const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const QRIS_IMG_SRC = "/qris.png";
+const QRIS_IMG_SRC = "/qris.png"; // taruh file di public/qris.png
 
 /* ==========================
    TYPES
@@ -37,6 +37,16 @@ type Sale = {
   payMethod: "cash" | "ewallet" | "qris";
   cash?: number; change?: number;
 };
+type DailyReport = {
+  outlet: string;
+  date: string; // YYYY-MM-DD
+  omzet: number;
+  trx: number;
+  cash: number;
+  ewallet: number;
+  qris: number;
+  items: { name: string; qty: number; total: number }[];
+};
 
 /* ==========================
    UTIL
@@ -46,31 +56,29 @@ const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",curre
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
-function dateKey(d: Date = new Date()) {
-  const z = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
-  return z.toISOString().slice(0, 10); // YYYY-MM-DD
-}
+const d2 = (n:number)=> String(n).padStart(2,"0");
+const dateKey = (d: Date)=> `${d.getFullYear()}-${d2(d.getMonth()+1)}-${d2(d.getDate())}`;
 
 /* ==========================
    APP
 ========================== */
 export default function App() {
-  // auth
+  /* ---- auth ---- */
   const [user, setUser] = useState<null | { email: string }>(null);
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
-  // tabs
+  /* ---- tabs ---- */
   const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
 
-  // login form
+  /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
 
-  // master
+  /* ---- master ---- */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
 
-  // POS
+  /* ---- POS ---- */
   const [queryText, setQueryText] = useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [noteInput, setNoteInput] = useState("");
@@ -81,26 +89,31 @@ export default function App() {
   const [cash, setCash] = useState<number>(0);
   const [showQR, setShowQR] = useState(false);
 
-  // loyalty
+  /* ---- loyalty ---- */
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPoints, setCustomerPoints] = useState<number|null>(null);
 
-  // shift
+  /* ---- shift ---- */
   const [activeShift, setActiveShift] = useState<Shift|null>(null);
   const [openCash, setOpenCash] = useState<number>(0);
 
-  // history
+  /* ---- history ---- */
   const [historyRows, setHistoryRows] = useState<Sale[]>([]);
   const [histCursor, setHistCursor] = useState<any>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  // dashboard
+  /* ---- dashboard ---- */
   const [dashLoading, setDashLoading] = useState(false);
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
-  // computed
+  // Laporan Harian
+  const [dailyDate, setDailyDate] = useState(dateKey(new Date()));
+  const [daily, setDaily] = useState<DailyReport | null>(null);
+  const [dailyLoading, setDailyLoading] = useState(false);
+
+  /* ---- computed ---- */
   const filteredProducts = useMemo(
     () => products.filter(p => (p.active!==false) && p.name.toLowerCase().includes(queryText.toLowerCase())),
     [products, queryText]
@@ -111,7 +124,9 @@ export default function App() {
   const total = Math.max(0, subtotal + taxVal + svcVal - (discount||0));
   const change = Math.max(0, (cash||0) - total);
 
-  /* AUTH WATCH */
+  /* ==========================
+     AUTH WATCH
+  =========================== */
   useEffect(()=>{
     const unsub = onAuthStateChanged(auth, u=>{
       setUser(u?.email? {email:u.email}: null);
@@ -119,10 +134,13 @@ export default function App() {
     return () => unsub();
   },[]);
 
-  /* LOAD DATA AFTER LOGIN */
+  /* ==========================
+     LOAD DATA AFTER LOGIN
+  =========================== */
   useEffect(()=>{
     if(!user) return;
 
+    // products
     const qProd = query(collection(db,"products"), where("outlet","==",OUTLET));
     const unsubProd = onSnapshot(qProd, snap=>{
       const rows: Product[] = snap.docs.map(d=>{
@@ -132,6 +150,7 @@ export default function App() {
       setProducts(rows);
     }, err=>alert("Memuat produk gagal.\n"+(err.message||err)));
 
+    // ingredients
     const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
     const unsubIng = onSnapshot(qIng, snap=>{
       const rows: Ingredient[] = snap.docs.map(d=>{
@@ -141,13 +160,20 @@ export default function App() {
       setIngredients(rows);
     }, err=>alert("Memuat inventori gagal.\n"+(err.message||err)));
 
+    // shift
     checkActiveShift().catch(e=>console.warn(e));
+    // dashboard awal
     loadDashboard().catch(()=>{});
+    // laporan harian awal
+    loadDailyReport(dateKey(new Date())).catch(()=>{});
 
     return ()=>{ unsubProd(); unsubIng(); };
+    // eslint-disable-next-line
   },[user?.email]);
 
-  /* AUTH handlers */
+  /* ==========================
+     AUTH handlers
+  =========================== */
   async function doLogin(e?: React.FormEvent){
     e?.preventDefault();
     try{
@@ -161,7 +187,9 @@ export default function App() {
   }
   async function doLogout(){ await signOut(auth); }
 
-  /* SHIFT */
+  /* ==========================
+     SHIFT
+  =========================== */
   async function checkActiveShift(){
     try{
       const qShift = query(
@@ -180,7 +208,7 @@ export default function App() {
         openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
       });
     }catch(e:any){
-      alert("Gagal cek shift aktif.\nKemungkinan perlu Firestore index untuk koleksi 'shifts': outlet(ASC), isOpen(ASC), openAt(DESC)\n\n"+(e?.message||e));
+      alert("Gagal cek shift aktif.\n" + (e?.message || e));
     }
   }
 
@@ -195,104 +223,56 @@ export default function App() {
     await checkActiveShift();
   }
 
-  // === PATCHED closeShiftAction (dengan fallback + rekap otomatis) ===
-  async function closeShiftAction() {
-    if (!activeShift?.id) return alert("Tidak ada shift aktif.");
-
-    try {
-      const closeAt = serverTimestamp();
-      await updateDoc(doc(db, "shifts", activeShift.id), { isOpen: false, closeAt });
-
-      // Ambil sales shift ini
-      let salesSnap;
-      try {
-        const q1 = query(
-          collection(db, "sales"),
-          where("outlet", "==", OUTLET),
-          where("shiftId", "==", activeShift.id)
-        );
-        salesSnap = await getDocs(q1);
-      } catch (e: any) {
-        console.warn("Query sales komposit gagal, fallback ke shiftId saja:", e?.message || e);
-        const q2 = query(collection(db, "sales"), where("shiftId", "==", activeShift.id));
-        salesSnap = await getDocs(q2);
-      }
-
-      // Hitung totals
-      let gross = 0, trx = 0, cashSum = 0, ewSum = 0, qrisSum = 0;
-      let tax = 0, service = 0, discount = 0;
-
-      salesSnap.docs.forEach(d => {
+  async function closeShiftAction(){
+    if(!activeShift?.id) return;
+    try{
+      // hitung ringkasan hari ini (untuk rekap harian)
+      const today = dateKey(new Date());
+      const qToday = query(
+        collection(db,"sales"),
+        where("outlet","==",OUTLET),
+        where("time", ">=", Timestamp.fromDate(startOfDay())),
+        where("time", "<=", Timestamp.fromDate(endOfDay()))
+      );
+      const sToday = await getDocs(qToday);
+      let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
+      const itemsMap = new Map<string, {qty:number,total:number}>();
+      sToday.docs.forEach(d=>{
         const x = d.data() as any;
-        trx += 1;
-        gross += x.total || 0;
-        tax += x.tax || 0;
-        service += x.service || 0;
-        discount += x.discount || 0;
-        if (x.payMethod === "cash") cashSum += x.total || 0;
-        else if (x.payMethod === "ewallet") ewSum += x.total || 0;
-        else if (x.payMethod === "qris") qrisSum += x.total || 0;
+        omzet += x.total||0; trx += 1;
+        if(x.payMethod==="cash") cashSum += x.total||0;
+        if(x.payMethod==="ewallet") ew += x.total||0;
+        if(x.payMethod==="qris") qr += x.total||0;
+        (x.items||[]).forEach((it:any)=>{
+          const cur = itemsMap.get(it.name) || {qty:0,total:0};
+          cur.qty += it.qty||0; cur.total += (it.price||0)*(it.qty||0);
+          itemsMap.set(it.name, cur);
+        });
       });
+      const items = Array.from(itemsMap.entries()).map(([name,v])=>({ name, qty:v.qty, total:v.total }));
 
-      // Simpan rekap shift
-      await setDoc(
-        doc(db, "shift_reports", activeShift.id),
-        {
-          outlet: OUTLET,
-          shiftId: activeShift.id,
-          openBy: activeShift.openBy,
-          openAt: activeShift.openAt || null,
-          closeAt,
-          openCash: activeShift.openCash || 0,
-          totals: { gross, trx, cash: cashSum, ewallet: ewSum, qris: qrisSum, tax, service, discount },
-          dateKey: dateKey(),
-          createdAt: serverTimestamp()
-        },
-        { merge: true }
-      );
+      await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
 
-      // Akumulasi harian
-      const dailyRef = doc(db, "reports_daily", `${OUTLET}_${dateKey()}`);
-      const prev = await getDoc(dailyRef);
-      const p: any = prev.exists() ? prev.data() : {};
-      await setDoc(
-        dailyRef,
-        {
-          outlet: OUTLET,
-          dateKey: dateKey(),
-          gross: (p.gross || 0) + gross,
-          trx: (p.trx || 0) + trx,
-          cash: (p.cash || 0) + cashSum,
-          ewallet: (p.ewallet || 0) + ewSum,
-          qris: (p.qris || 0) + qrisSum,
-          tax: (p.tax || 0) + tax,
-          service: (p.service || 0) + service,
-          discount: (p.discount || 0) + discount,
-          updatedAt: serverTimestamp()
-        },
-        { merge: true }
-      );
+      // tulis / merge laporan harian
+      await setDoc(doc(db,"reports_daily", `${OUTLET}_${today}`), {
+        outlet: OUTLET, date: today,
+        omzet, trx, cash: cashSum, ewallet: ew, qris: qr,
+        items
+      }, { merge: true });
 
       setActiveShift(null);
-      alert(
-        `Shift ditutup.\n\n` +
-        `Transaksi: ${trx}\n` +
-        `Omzet  : ${IDR(gross)}\n` +
-        `Cash   : ${IDR(cashSum)} | eWallet: ${IDR(ewSum)} | QRIS: ${IDR(qrisSum)}`
-      );
-      if (isOwner) loadDashboard().catch(() => {});
-    } catch (e: any) {
-      alert(
-        "Tutup shift gagal.\n" +
-        (e?.message || e) +
-        "\n\nJika error menyebut 'index', pastikan index Firestore untuk " +
-        "koleksi 'sales' (outlet ASC, shiftId ASC) sudah selesai."
-      );
-      console.error(e);
+      alert("Shift ditutup & laporan harian diperbarui.");
+      // refresh dashboard & daily panel
+      loadDashboard().catch(()=>{});
+      loadDailyReport(today).catch(()=>{});
+    }catch(e:any){
+      alert("Tutup shift gagal.\n" + (e?.message || e));
     }
   }
 
-  /* POS */
+  /* ==========================
+     POS
+  =========================== */
   function addToCart(p: Product){
     setCart(prev=>{
       const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
@@ -305,7 +285,7 @@ export default function App() {
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
   const clearCart = ()=> { setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput(""); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); };
 
-  // loyalty: auto lookup by phone
+  /* loyalty: auto lookup by phone */
   useEffect(()=>{
     if(!user) return;
     const phone = customerPhone.trim();
@@ -318,13 +298,13 @@ export default function App() {
           const c = s.data() as any;
           setCustomerName(c.name||""); setCustomerPoints(c.points||0);
         }else{
-          setCustomerPoints(0);
+          setCustomerPoints(0); // pelanggan baru
         }
       }catch(e:any){ console.warn("Lookup customer:", e?.message||e); }
     })();
   },[customerPhone, user]);
 
-  // print 80mm
+  /* print 80mm */
   function printReceipt(rec: Omit<Sale,"id">, saleId?: string){
     const itemsHtml = rec.items.map(i=>`<tr><td>${i.name}${i.note?`<div style='font-size:10px;opacity:.7'>${i.note}</div>`:""}</td><td style='text-align:center'>${i.qty}x</td><td style='text-align:right'>${IDR(i.price*i.qty)}</td></tr>`).join("");
     const w = window.open("", "_blank", "width=380,height=600");
@@ -364,6 +344,7 @@ img{display:block;margin:0 auto 6px;height:42px}
     w.document.write(html); w.document.close();
   }
 
+  /* finalize */
   async function finalize(){
     if(!user?.email) return alert("Belum login.");
     if(!activeShift?.id) return alert("Buka shift dahulu.");
@@ -386,7 +367,7 @@ img{display:block;margin:0 auto 6px;height:42px}
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
         const s = await getDoc(cref);
-        const pts = Math.floor(total/10000);
+        const pts = Math.floor(total/10000); // contoh: 10rb = 1 poin
         if(s.exists()){
           const c = s.data() as any;
           await updateDoc(cref, { points:(c.points||0)+pts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
@@ -398,14 +379,16 @@ img{display:block;margin:0 auto 6px;height:42px}
       printReceipt(payload, ref.id);
       clearCart();
       if(tab==="history") loadHistory(false);
-      if(isOwner && tab==="dashboard") loadDashboard().catch(()=>{});
+      if(isOwner) { loadDashboard().catch(()=>{}); loadDailyReport(dateKey(new Date())).catch(()=>{}); }
 
     }catch(err:any){
       alert("Transaksi gagal disimpan: "+(err?.message||err));
     }
   }
 
-  /* HISTORY */
+  /* ==========================
+     HISTORY
+  =========================== */
   async function loadHistory(append:boolean){
     if(!user) return;
     setHistoryLoading(true);
@@ -437,11 +420,14 @@ img{display:block;margin:0 auto 6px;height:42px}
     }finally{ setHistoryLoading(false); }
   }
 
-  /* DASHBOARD */
+  /* ==========================
+     DASHBOARD OWNER
+  =========================== */
   async function loadDashboard(){
     if(!isOwner) return;
     setDashLoading(true);
     try {
+      // Hari ini
       const qToday = query(
         collection(db,"sales"),
         where("outlet","==",OUTLET),
@@ -470,6 +456,7 @@ img{display:block;margin:0 auto 6px;height:42px}
 
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
+      // 7 hari terakhir
       const from7 = startOfDay(daysAgo(6));
       const q7 = query(
         collection(db,"sales"),
@@ -498,7 +485,97 @@ img{display:block;margin:0 auto 6px;height:42px}
     }
   }
 
-  /* OWNER: PRODUCTS & INVENTORY */
+  // === Laporan Harian ===
+  async function loadDailyReport(dateStr = dailyDate) {
+    if (!isOwner) return;
+    setDailyLoading(true);
+    try {
+      const id = `${OUTLET}_${dateStr}`;
+      const s = await getDoc(doc(db, "reports_daily", id));
+      if (s.exists()) {
+        const x = s.data() as any;
+        const rep: DailyReport = {
+          outlet: x.outlet,
+          date: x.date || dateStr,
+          omzet: x.omzet || 0,
+          trx: x.trx || 0,
+          cash: x.cash || 0,
+          ewallet: x.ewallet || 0,
+          qris: x.qris || 0,
+          items: (x.items || []).map((it: any) => ({
+            name: it.name, qty: it.qty || 0, total: it.total || 0
+          }))
+        };
+        setDaily(rep);
+      } else {
+        setDaily(null);
+      }
+    } catch (e:any) {
+      alert("Gagal memuat laporan harian: " + (e.message || e));
+    } finally {
+      setDailyLoading(false);
+    }
+  }
+  function exportDailyCSV() {
+    if (!daily) return;
+    const lines = [
+      `Outlet,${daily.outlet}`,
+      `Tanggal,${daily.date}`,
+      `Omzet,${daily.omzet}`,
+      `Transaksi,${daily.trx}`,
+      `Cash,${daily.cash}`,
+      `eWallet,${daily.ewallet}`,
+      `QRIS,${daily.qris}`,
+      "",
+      "Nama Item,Qty,Total"
+    ];
+    for (const it of daily.items) {
+      lines.push(`"${it.name.replaceAll('"','""')}",${it.qty},${it.total}`);
+    }
+    const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `laporan_${daily.outlet}_${daily.date}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  function printDaily() {
+    if (!daily) return;
+    const rows = daily.items
+      .map(it => `<tr><td>${it.name}</td><td style="text-align:right">${it.qty}</td><td style="text-align:right">${IDR(it.total)}</td></tr>`)
+      .join("");
+    const w = window.open("", "_blank", "width=700,height=800");
+    if (!w) return;
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Laporan ${daily.date}</title>
+    <style>
+    body{font-family:ui-sans-serif,system-ui; padding:16px}
+    h2{margin:8px 0}
+    table{width:100%; border-collapse:collapse}
+    th,td{padding:6px 4px; border-bottom:1px solid #eee; font-size:13px}
+    .kpi{display:flex; gap:12px; margin:10px 0}
+    .kpi div{padding:8px 10px; border:1px solid #eee; border-radius:8px}
+    </style></head><body>
+    <h2>Laporan Harian — ${daily.outlet}</h2>
+    <div>Tanggal: <b>${daily.date}</b></div>
+    <div class="kpi">
+      <div>Omzet: <b>${IDR(daily.omzet)}</b></div>
+      <div>Transaksi: <b>${daily.trx}</b></div>
+      <div>Cash: <b>${IDR(daily.cash)}</b></div>
+      <div>eWallet: <b>${IDR(daily.ewallet)}</b></div>
+      <div>QRIS: <b>${IDR(daily.qris)}</b></div>
+    </div>
+    <table>
+      <thead><tr><th>Menu</th><th style="text-align:right">Qty</th><th style="text-align:right">Total</th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="3">Belum ada data</td></tr>`}</tbody>
+    </table>
+    <script>window.print();</script>
+    </body></html>`);
+    w.document.close();
+  }
+
+  /* ==========================
+     OWNER: PRODUCTS & INVENTORY
+  =========================== */
   async function upsertProduct(p: Partial<Product> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = p.id || uid();
@@ -520,7 +597,9 @@ img{display:block;margin:0 auto 6px;height:42px}
     }, { merge:true });
   }
 
-  /* UI: LOGIN */
+  /* ==========================
+     UI
+  =========================== */
   if(!user){
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
@@ -543,7 +622,6 @@ img{display:block;margin:0 auto 6px;height:42px}
     );
   }
 
-  /* UI: MAIN */
   return (
     <div className="min-h-screen bg-neutral-50">
       {/* Topbar */}
@@ -590,6 +668,7 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
+            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -597,6 +676,8 @@ img{display:block;margin:0 auto 6px;height:42px}
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
+
+            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -610,6 +691,7 @@ img{display:block;margin:0 auto 6px;height:42px}
                   </tbody>
                 </table>
               </div>
+
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
@@ -626,6 +708,60 @@ img{display:block;margin:0 auto 6px;height:42px}
                   ))}
                 </div>
               </div>
+            </div>
+
+            {/* === Laporan Harian === */}
+            <div className="bg-white border rounded-2xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="font-semibold">Laporan Harian</div>
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="date"
+                    className="border rounded-lg px-2 py-1"
+                    value={dailyDate}
+                    onChange={(e)=>{ setDailyDate(e.target.value); loadDailyReport(e.target.value); }}
+                  />
+                  <button className="px-3 py-1.5 rounded-lg border" onClick={()=>loadDailyReport()}>Muat</button>
+                  <button className="px-3 py-1.5 rounded-lg border" onClick={exportDailyCSV} disabled={!daily}>Export CSV</button>
+                  <button className="px-3 py-1.5 rounded-lg border" onClick={printDaily} disabled={!daily}>Print</button>
+                </div>
+              </div>
+
+              {dailyLoading && <div className="text-sm text-neutral-500">Memuat…</div>}
+              {!dailyLoading && !daily && <div className="text-sm text-neutral-500">Belum ada laporan pada tanggal ini.</div>}
+
+              {!!daily && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                    <KPI title="Omzet" value={IDR(daily.omzet)} />
+                    <KPI title="Transaksi" value={String(daily.trx)} />
+                    <KPI title="Cash" value={IDR(daily.cash)} />
+                    <KPI title="eWallet" value={IDR(daily.ewallet)} />
+                    <KPI title="QRIS" value={IDR(daily.qris)} />
+                    <KPI title="Avg Ticket" value={daily.trx? IDR(Math.round(daily.omzet/daily.trx)) : "Rp 0"} />
+                  </div>
+                  <div className="overflow-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-left border-b">
+                          <th className="py-2">Menu</th>
+                          <th className="text-right">Qty</th>
+                          <th className="text-right">Total</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {daily.items.map((it,i)=>(
+                          <tr key={i} className="border-b">
+                            <td className="py-2">{it.name}</td>
+                            <td className="text-right">{it.qty}</td>
+                            <td className="text-right">{IDR(it.total)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
           </section>
         )}
