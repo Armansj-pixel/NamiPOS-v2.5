@@ -1,8 +1,8 @@
 // src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
-  addDoc, collection, deleteDoc, doc, getDoc, getDocs, onSnapshot, orderBy, query,
-  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter, writeBatch
+  addDoc, collection, doc, getDoc, getDocs, onSnapshot, orderBy, query,
+  serverTimestamp, setDoc, Timestamp, updateDoc, where, limit, startAfter
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
@@ -16,6 +16,7 @@ const OWNER_EMAILS = new Set([
   "ayuismaalabibbah@gmail.com",
 ]);
 const QRIS_IMG_SRC = "/qris.png"; // letakkan file di /public/qris.png
+const LOGO_IMG_SRC = "/logo.png"; // letakkan file di /public/logo.png
 
 /* ==========================
    TYPES
@@ -23,7 +24,7 @@ const QRIS_IMG_SRC = "/qris.png"; // letakkan file di /public/qris.png
 type Product = { id: string; name: string; price: number; category?: string; active?: boolean; outlet?: string };
 type Ingredient = { id: string; name: string; unit: string; stock: number; min?: number; outlet?: string };
 type CartItem = { id: string; productId: string; name: string; price: number; qty: number; note?: string };
-type Shift = { id: string; outlet: string; openBy: string; openAt: Timestamp; closeAt?: Timestamp | null; openCash?: number; isOpen: boolean };
+type Shift = { id: string; outlet: string; openBy: string; openAt: Timestamp; closeAt?: Timestamp | null; openCash?: number; isOpen: boolean; recap?: any };
 type Sale = {
   id?: string;
   outlet: string;
@@ -37,20 +38,6 @@ type Sale = {
   payMethod: "cash" | "ewallet" | "qris";
   cash?: number; change?: number;
 };
-type RecipeItem = { ingredientId: string; qty: number; unit?: string };
-type RecipeDoc = { productId: string; outlet: string; items: RecipeItem[] };
-
-type InventoryLog = {
-  id?: string;
-  outlet: string;
-  time: Timestamp | null;
-  saleId: string;
-  productId: string;
-  ingredientId: string;
-  qty: number; // keluar
-  unit: string;
-};
-type AppUser = { email: string; role: "owner"|"staff"; outlet: string };
 
 /* ==========================
    UTIL
@@ -59,7 +46,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
-const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
+const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); x.setHours(0,0,0,0); return x; };
 
 /* ==========================
    APP
@@ -70,7 +57,7 @@ export default function App() {
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory"|"settings">("pos");
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
@@ -79,13 +66,6 @@ export default function App() {
   /* ---- master ---- */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  const [recipeMap, setRecipeMap] = useState<Record<string, RecipeItem[]>>({}); // productId -> items
-
-  /* ---- edit modals ---- */
-  const [editProduct, setEditProduct] = useState<Partial<Product>|null>(null);
-  const [editIngredient, setEditIngredient] = useState<Partial<Ingredient>|null>(null);
-  const [editRecipeFor, setEditRecipeFor] = useState<Product|null>(null);
-  const [recipeDraft, setRecipeDraft] = useState<RecipeItem[]>([]);
 
   /* ---- POS ---- */
   const [queryText, setQueryText] = useState("");
@@ -102,11 +82,14 @@ export default function App() {
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPoints, setCustomerPoints] = useState<number|null>(null);
-  const [redeemPts, setRedeemPts] = useState(0); // V2.1 redeem
+  const earnPointRate = 10000; // 10rb = 1 poin
+  const redeemValuePerPoint = 1000; // 1 poin = Rp1.000
+  const [redeemPts, setRedeemPts] = useState(0);
 
   /* ---- shift ---- */
   const [activeShift, setActiveShift] = useState<Shift|null>(null);
   const [openCash, setOpenCash] = useState<number>(0);
+  const [closingBusy, setClosingBusy] = useState(false);
 
   /* ---- history ---- */
   const [historyRows, setHistoryRows] = useState<Sale[]>([]);
@@ -115,15 +98,8 @@ export default function App() {
 
   /* ---- dashboard ---- */
   const [dashLoading, setDashLoading] = useState(false);
-  const [dateRange, setDateRange] = useState<"today"|"7d"|"30d">("today");
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
-
-  /* ---- low stock ---- */
-  const [lowStockList, setLowStockList] = useState<Ingredient[]>([]);
-
-  /* ---- staff (whitelist display) ---- */
-  const [staffList, setStaffList] = useState<AppUser[]>([]);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -133,9 +109,9 @@ export default function App() {
   const subtotal = useMemo(()=> cart.reduce((s,i)=> s + i.price*i.qty, 0), [cart]);
   const taxVal = Math.round(subtotal * (taxPct/100));
   const svcVal = Math.round(subtotal * (svcPct/100));
-  const redeemValue = redeemPts * 1000; // contoh: 1 poin = Rp1.000
-  const effectiveDiscount = Math.min(discount + redeemValue, subtotal + taxVal + svcVal);
-  const total = Math.max(0, subtotal + taxVal + svcVal - (effectiveDiscount || 0));
+  const redeemValue = Math.min(redeemPts, customerPoints||0) * redeemValuePerPoint;
+  const totalBeforeRedeem = Math.max(0, subtotal + taxVal + svcVal - (discount||0));
+  const total = Math.max(0, totalBeforeRedeem - redeemValue);
   const change = Math.max(0, (cash||0) - total);
 
   /* ==========================
@@ -174,41 +150,14 @@ export default function App() {
       setIngredients(rows);
     }, err=>alert("Memuat inventori gagal.\n"+(err.message||err)));
 
-    // recipes (map)
-    const qRec = query(collection(db,"recipes"), where("outlet","==",OUTLET));
-    const unsubRec = onSnapshot(qRec, snap=>{
-      const m: Record<string, RecipeItem[]> = {};
-      snap.docs.forEach(d=>{
-        const x = d.data() as any;
-        m[x.productId] = Array.isArray(x.items) ? x.items : [];
-      });
-      setRecipeMap(m);
-    });
-
-    // users (whitelist tampilan)
-    const qUsers = query(collection(db,"users"), where("outlet","==",OUTLET));
-    const unsubUsers = onSnapshot(qUsers, snap=>{
-      const rows: AppUser[] = snap.docs.map(d=>{
-        const x = d.data() as any;
-        return { email:x.email, role:(x.role||"staff"), outlet:(x.outlet||OUTLET) };
-      });
-      setStaffList(rows);
-    });
-
     // shift
     checkActiveShift().catch(e=>console.warn(e));
     // dashboard awal
     loadDashboard().catch(()=>{});
 
-    return ()=>{ unsubProd(); unsubIng(); unsubRec(); unsubUsers(); };
+    return ()=>{ unsubProd(); unsubIng(); };
     // eslint-disable-next-line
   },[user?.email]);
-
-  // low stock recalc
-  useEffect(()=>{
-    const lows = ingredients.filter(i => (i.stock||0) <= (i.min||0));
-    setLowStockList(lows);
-  },[ingredients]);
 
   /* ==========================
      AUTH handlers
@@ -243,7 +192,7 @@ export default function App() {
     const x = d.data() as any;
     setActiveShift({
       id:d.id, outlet:x.outlet, openBy:x.openBy,
-      openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
+      openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true, recap:x.recap
     });
   }
 
@@ -259,30 +208,36 @@ export default function App() {
   }
 
   async function closeShiftAction(){
-    if(!activeShift?.id) return;
-    // hitung rekap shift
-    const qSales = query(collection(db,"sales"),
-      where("outlet","==",OUTLET),
-      where("shiftId","==",activeShift.id)
-    );
-    const s = await getDocs(qSales);
-    let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
-    s.docs.forEach(d=>{
-      const x = d.data() as any;
-      omzet += x.total||0; trx += 1;
-      if(x.payMethod==="cash") cashSum += x.total||0;
-      if(x.payMethod==="ewallet") ew += x.total||0;
-      if(x.payMethod==="qris") qr += x.total||0;
-    });
+    if(!activeShift?.id) return alert("Tidak ada shift aktif.");
+    try{
+      setClosingBusy(true);
 
-    await updateDoc(doc(db,"shifts", activeShift.id), {
-      isOpen:false, closeAt: serverTimestamp(),
-      recap: { omzet, trx, cash: cashSum, ewallet: ew, qris: qr }
-    });
-    setActiveShift(null);
-    alert("Shift ditutup. Rekap tersimpan di dokumen shift.");
-    // refresh dashboard
-    loadDashboard().catch(()=>{});
+      // ambil semua sales di shift ini
+      const qs = query(collection(db,"sales"), where("outlet","==",OUTLET), where("shiftId","==", activeShift.id));
+      const s = await getDocs(qs);
+      let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
+      s.docs.forEach(d=>{
+        const x = d.data() as any;
+        omzet += x.total||0; trx += 1;
+        if(x.payMethod==="cash") cashSum += x.total||0;
+        if(x.payMethod==="ewallet") ew += x.total||0;
+        if(x.payMethod==="qris") qr += x.total||0;
+      });
+      const recap = { omzet, trx, cash: cashSum, ewallet: ew, qris: qr };
+
+      await updateDoc(doc(db,"shifts", activeShift.id), {
+        isOpen:false, closeAt: serverTimestamp(), recap
+      });
+
+      setActiveShift(null);
+      alert("Shift ditutup.\nRekap otomatis tersimpan.");
+      // refresh dashboard
+      loadDashboard().catch(()=>{});
+    }catch(e:any){
+      alert("Gagal menutup shift: "+(e?.message||e));
+    }finally{
+      setClosingBusy(false);
+    }
   }
 
   /* ==========================
@@ -299,10 +254,8 @@ export default function App() {
   const dec = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:Math.max(1, ci.qty-1) } : ci));
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
   const clearCart = ()=> {
-    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0);
-    setPayMethod("cash"); setCash(0); setNoteInput("");
-    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
-    setRedeemPts(0);
+    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput("");
+    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); setRedeemPts(0);
   };
 
   /* loyalty: auto lookup by phone */
@@ -340,7 +293,8 @@ td{padding:4px 0;border-bottom:1px dashed #ccc;font-size:12px}
 img{display:block;margin:0 auto 6px;height:42px}
 </style></head><body>
 <div class="wrap">
-  ${rec.payMethod!=="cash" ? `<img src="${QRIS_IMG_SRC}" onerror="this.style.display='none'"/>` : ""}
+  <img src="${LOGO_IMG_SRC}" alt="Logo" onerror="this.style.display='none'"/>
+  ${rec.payMethod!=="cash" ? `<img src="${QRIS_IMG_SRC}" alt="QRIS" onerror="this.style.display='none'"/>` : ""}
   <h2>CHAFU MATCHA — ${OUTLET}</h2>
   <div class="meta">${saleId||"DRAFT"}<br/>${new Date().toLocaleString("id-ID",{hour12:false})}</div>
   <hr/>
@@ -350,7 +304,8 @@ img{display:block;margin:0 auto 6px;height:42px}
     ${rec.tax?`<tr class="tot"><td>Pajak</td><td></td><td style="text-align:right">${IDR(rec.tax)}</td></tr>`:""}
     ${rec.service?`<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(rec.service)}</td></tr>`:""}
     ${rec.discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(rec.discount)}</td></tr>`:""}
-    <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(rec.total)}</td></tr>
+    ${rec.payMethod!=="cash" && ${redeemValue} ? `<tr class="tot"><td>Redeem Poin</td><td></td><td style="text-align:right">-${IDR(${redeemValue})}</td></tr>` : ""}
+    <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(${total})}</td></tr>
     ${rec.payMethod==="cash"
       ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(rec.cash||0)}</td></tr>
          <tr><td>Kembali</td><td></td><td style='text-align:right'>${IDR(rec.change||0)}</td></tr>`
@@ -371,70 +326,42 @@ img{display:block;margin:0 auto 6px;height:42px}
     if(cart.length===0) return alert("Keranjang kosong.");
     if(payMethod==="cash" && cash<total) return alert("Uang tunai kurang.");
 
-    // 1) Simpan sale
     const payload: Omit<Sale,"id"> = {
       outlet: OUTLET, shiftId: activeShift.id, cashierEmail: user.email,
       customerPhone: customerPhone?.trim()||null, customerName: customerName?.trim()||null,
       time: serverTimestamp() as any,
       items: cart.map(i=> ({ name:i.name, price:i.price, qty:i.qty, ...(i.note?{note:i.note}:{}) })),
-      subtotal, discount: effectiveDiscount||0, tax: taxVal, service: svcVal, total, payMethod,
+      subtotal, discount: discount||0, tax: taxVal, service: svcVal, total, payMethod,
       ...(payMethod==="cash" ? { cash, change } : {})
     };
 
     try{
-      const saleRef = await addDoc(collection(db,"sales"), payload as any);
+      const ref = await addDoc(collection(db,"sales"), payload as any);
 
-      // 2) Loyalty (earn - redeem)
-      if ((customerPhone.trim().length) >= 8) {
+      // loyalty: earn & redeem
+      if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
         const s = await getDoc(cref);
-        const earnPts = Math.floor(total/10000); // earn dari net total
-        const spendPts = redeemPts; // dipakai
-        if (s.exists()) {
+        const earnPts = Math.floor(totalBeforeRedeem / earnPointRate);
+        const usePts = Math.min(redeemPts, s.exists() ? (s.data() as any).points||0 : 0);
+        if(s.exists()){
           const c = s.data() as any;
-          const newPts = Math.max(0, (c.points||0) - spendPts + earnPts);
-          await updateDoc(cref, { points:newPts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
-        } else {
-          await setDoc(cref, { phone: customerPhone.trim(), name: customerName||"Member", points: Math.max(0, earnPts - spendPts), lastVisit: serverTimestamp() });
+          await updateDoc(cref, {
+            points: Math.max(0, (c.points||0) - usePts) + earnPts,
+            name: customerName||c.name||"", lastVisit: serverTimestamp()
+          });
+        }else{
+          await setDoc(cref, { phone: customerPhone.trim(), name: customerName||"Member", points: earnPts, lastVisit: serverTimestamp() });
         }
       }
 
-      // 3) Kurangi stok berdasarkan resep (jika ada) + log
-      try {
-        const b = writeBatch(db);
-        const bLog = writeBatch(db);
-        for (const ci of cart) {
-          const rec = recipeMap[ci.productId] || [];
-          for (const r of rec) {
-            const ing = ingredients.find(i=>i.id===r.ingredientId);
-            if (!ing) continue;
-            const newStock = Math.max(0, (ing.stock||0) - (r.qty||0)*ci.qty);
-            b.update(doc(db,"ingredients", ing.id), { stock: newStock });
+      // cetak struk
+      printReceipt(payload, ref.id);
 
-            // log keluar
-            const logId = `LOG-${Date.now()}-${uid()}`;
-            bLog.set(doc(db,"inventory_logs", logId), {
-              outlet: OUTLET,
-              time: serverTimestamp(),
-              saleId: saleRef.id,
-              productId: ci.productId,
-              ingredientId: r.ingredientId,
-              qty: (r.qty||0) * ci.qty,
-              unit: r.unit || ing.unit || ""
-            } as InventoryLog);
-          }
-        }
-        await b.commit();
-        await bLog.commit();
-      } catch (e) {
-        console.warn("Pengurangan stok/log gagal:", e);
-      }
-
-      // 4) Cetak & bersih
-      printReceipt(payload, saleRef.id);
+      // clear
       clearCart();
       if(tab==="history") loadHistory(false);
-      if(isOwner && (tab==="dashboard")) loadDashboard().catch(()=>{});
+      if(isOwner && tab==="dashboard") loadDashboard().catch(()=>{});
 
     }catch(err:any){
       alert("Transaksi gagal disimpan: "+(err?.message||err));
@@ -482,24 +409,18 @@ img{display:block;margin:0 auto 6px;height:42px}
     if(!isOwner) return;
     setDashLoading(true);
     try {
-      // range
-      let from = startOfDay();
-      if(dateRange==="7d") from = startOfDay(daysAgo(6));
-      if(dateRange==="30d") from = startOfDay(daysAgo(29));
-      const to = endOfDay();
-
-      // Aggre
-      const qRange = query(
+      // Hari ini
+      const qToday = query(
         collection(db,"sales"),
         where("outlet","==",OUTLET),
-        where("time", ">=", Timestamp.fromDate(from)),
-        where("time", "<=", Timestamp.fromDate(to)),
-        orderBy("time","asc")
+        where("time", ">=", Timestamp.fromDate(startOfDay())),
+        where("time", "<=", Timestamp.fromDate(endOfDay())),
+        orderBy("time","desc")
       );
-      const snap = await getDocs(qRange);
+      const sToday = await getDocs(qToday);
       let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
       const counter = new Map<string, number>();
-      snap.docs.forEach(d=>{
+      sToday.docs.forEach(d=>{
         const x = d.data() as any;
         omzet += x.total||0; trx += 1;
         if(x.payMethod==="cash") cashSum += x.total||0;
@@ -517,21 +438,29 @@ img{display:block;margin:0 auto 6px;height:42px}
 
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
-      // bucketing untuk grafik (7d/30d)
-      const span = dateRange==="today" ? 1 : dateRange==="7d" ? 7 : 30;
-      const base = new Map<string, {omzet:number; trx:number}>();
-      for(let i=span-1;i>=0;i--){
+      // 7 hari terakhir
+      const from7 = startOfDay(daysAgo(6));
+      const q7 = query(
+        collection(db,"sales"),
+        where("outlet","==",OUTLET),
+        where("time", ">=", Timestamp.fromDate(from7)),
+        where("time", "<=", Timestamp.fromDate(endOfDay())),
+        orderBy("time","asc")
+      );
+      const s7 = await getDocs(q7);
+      const bucket = new Map<string, {omzet:number; trx:number}>();
+      for(let i=6;i>=0;i--){
         const d = startOfDay(daysAgo(i)); const key = d.toISOString().slice(0,10);
-        base.set(key,{omzet:0,trx:0});
+        bucket.set(key,{omzet:0,trx:0});
       }
-      snap.docs.forEach(d=>{
+      s7.docs.forEach(d=>{
         const x=d.data() as any;
         const key = new Date(x.time?.toDate?.() || Date.now()).toISOString().slice(0,10);
-        if(!base.has(key)) base.set(key,{omzet:0,trx:0});
-        const cur = base.get(key)!;
+        if(!bucket.has(key)) bucket.set(key,{omzet:0,trx:0});
+        const cur = bucket.get(key)!;
         cur.omzet += x.total||0; cur.trx += 1;
       });
-      const arr = Array.from(base.entries()).map(([date,v])=>({date, ...v}));
+      const arr = Array.from(bucket.entries()).map(([date,v])=>({date, ...v}));
       setLast7(arr);
     } finally {
       setDashLoading(false);
@@ -539,7 +468,7 @@ img{display:block;margin:0 auto 6px;height:42px}
   }
 
   /* ==========================
-     OWNER: PRODUCTS & INVENTORY & RECIPES
+     OWNER: PRODUCTS & INVENTORY
   =========================== */
   async function upsertProduct(p: Partial<Product> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
@@ -553,11 +482,6 @@ img{display:block;margin:0 auto 6px;height:42px}
     if(!isOwner) return alert("Akses khusus owner.");
     await updateDoc(doc(db,"products", id), { active:false });
   }
-  async function deleteProductHard(id:string){
-    if(!isOwner) return alert("Akses khusus owner.");
-    if(!confirm("Hapus produk ini permanen?")) return;
-    await deleteDoc(doc(db,"products", id));
-  }
   async function upsertIngredient(i: Partial<Ingredient> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = i.id || uid();
@@ -565,38 +489,6 @@ img{display:block;margin:0 auto 6px;height:42px}
       outlet: OUTLET, name:i.name||"Bahan", unit:i.unit||"pcs",
       stock: Number(i.stock)||0, min: Number(i.min)||0
     }, { merge:true });
-  }
-  async function deleteIngredientHard(id:string){
-    if(!isOwner) return alert("Akses khusus owner.");
-    if(!confirm("Hapus bahan ini permanen?")) return;
-    await deleteDoc(doc(db,"ingredients", id));
-  }
-
-  // recipes
-  function openRecipeEditor(p: Product){
-    setEditRecipeFor(p);
-    const items = recipeMap[p.id] || [];
-    setRecipeDraft(items.map(x=>({ ...x })));
-  }
-  function addRecipeRow(){
-    setRecipeDraft(prev=> [...prev, { ingredientId:"", qty:0, unit:"" }]);
-  }
-  function updateRecipeRow(idx:number, patch: Partial<RecipeItem>){
-    setRecipeDraft(prev=> prev.map((r,i)=> i===idx? { ...r, ...patch } : r ));
-  }
-  function removeRecipeRow(idx:number){
-    setRecipeDraft(prev=> prev.filter((_,i)=>i!==idx));
-  }
-  async function saveRecipe(){
-    if(!isOwner || !editRecipeFor) return;
-    const clean = recipeDraft.filter(r=> r.ingredientId && r.qty>0);
-    await setDoc(doc(db,"recipes", editRecipeFor.id), {
-      productId: editRecipeFor.id,
-      outlet: OUTLET,
-      items: clean.map(r=>({ ingredientId:r.ingredientId, qty:Number(r.qty)||0, unit:r.unit||"" }))
-    } as RecipeDoc, { merge:true });
-    setEditRecipeFor(null);
-    alert("Resep disimpan.");
   }
 
   /* ==========================
@@ -606,12 +498,10 @@ img{display:block;margin:0 auto 6px;height:42px}
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 border">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="h-10 w-10 rounded-2xl bg-emerald-600" />
-            <div>
-              <h1 className="text-2xl font-bold">CHAFU MATCHA — POS</h1>
-              <p className="text-xs text-neutral-500">@{OUTLET}</p>
-            </div>
+          <div className="flex flex-col items-center mb-4">
+            <img src={LOGO_IMG_SRC} alt="Logo" className="h-16 w-16 mb-2 object-contain" />
+            <h1 className="text-2xl font-bold">CHAFU MATCHA — POS</h1>
+            <p className="text-xs text-neutral-500">@{OUTLET}</p>
           </div>
           <form onSubmit={doLogin} className="space-y-3">
             <input className="w-full border rounded-lg p-3" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
@@ -624,13 +514,16 @@ img{display:block;margin:0 auto 6px;height:42px}
     );
   }
 
+  // stok menipis?
+  const lowStocks = ingredients.filter(i => (i.min||0) > 0 && (i.stock||0) <= (i.min||0));
+
   return (
     <div className="min-h-screen bg-neutral-50">
       {/* Topbar */}
       <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-emerald-600" />
+            <img src={LOGO_IMG_SRC} alt="Logo" className="h-8 w-8 rounded-xl object-contain bg-white border" />
             <div>
               <div className="font-bold">CHAFU MATCHA — {OUTLET}</div>
               <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
@@ -642,24 +535,16 @@ img{display:block;margin:0 auto 6px;height:42px}
             <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
             {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
             {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
-            {isOwner && <button onClick={()=>setTab("settings")} className={`px-3 py-1.5 rounded-lg border ${tab==="settings"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Pengaturan</button>}
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-4">
-        {/* Low stock banner */}
-        {lowStockList.length > 0 && (
-          <div className="mb-3 p-3 rounded-xl border bg-amber-50 text-sm">
-            <div className="font-semibold mb-1">Stok menipis:</div>
-            <div className="flex flex-wrap gap-2">
-              {lowStockList.map(x=>(
-                <span key={x.id} className="px-2 py-1 rounded bg-white border">
-                  {x.name} • sisa {x.stock} {x.unit} {(x.min||0)>0 && `(min ${x.min})`}
-                </span>
-              ))}
-            </div>
+        {/* Notif stok menipis */}
+        {lowStocks.length>0 && (
+          <div className="mb-3 p-3 rounded-xl bg-amber-50 border border-amber-200 text-sm">
+            <b>Peringatan stok menipis:</b> {lowStocks.map(i=>`${i.name} (${i.stock} ${i.unit})`).join(", ")}
           </div>
         )}
 
@@ -677,7 +562,9 @@ img{display:block;margin:0 auto 6px;height:42px}
                 <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>Buka Shift</button>
               </>
             ) : (
-              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>Tutup Shift</button>
+              <button disabled={closingBusy} className="px-3 py-2 rounded-lg bg-rose-600 text-white disabled:opacity-60" onClick={closeShiftAction}>
+                {closingBusy? "Menutup..." : "Tutup Shift"}
+              </button>
             )}
           </div>
         </div>
@@ -685,28 +572,19 @@ img{display:block;margin:0 auto 6px;height:42px}
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
-            {/* KPIs + filter */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                <KPI title="Omzet" value={IDR(todayStats.omzet)} />
-                <KPI title="Transaksi" value={String(todayStats.trx)} />
-                <KPI title="Avg Ticket" value={IDR(todayStats.avg)} />
-                <KPI title="Cash" value={IDR(todayStats.cash)} />
-                <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
-              </div>
-              <select className="border rounded-lg px-2 py-1"
-                      value={dateRange}
-                      onChange={e=>{ setDateRange(e.target.value as any); loadDashboard(); }}>
-                <option value="today">Hari ini</option>
-                <option value="7d">7 hari</option>
-                <option value="30d">30 hari</option>
-              </select>
+            {/* KPIs */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+              <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
+              <KPI title="Transaksi" value={String(todayStats.trx)} />
+              <KPI title="Avg Ticket" value={IDR(todayStats.avg)} />
+              <KPI title="Cash" value={IDR(todayStats.cash)} />
+              <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
 
-            {/* Top items + trend */}
+            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
-                <div className="font-semibold mb-2">5 Menu Terlaris</div>
+                <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
                 <table className="w-full text-sm">
                   <thead><tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr></thead>
                   <tbody>
@@ -719,7 +597,7 @@ img{display:block;margin:0 auto 6px;height:42px}
               </div>
 
               <div className="bg-white border rounded-2xl p-4">
-                <div className="font-semibold mb-2">Trend</div>
+                <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
                   {dashLoading && <div className="text-sm text-neutral-500">Memuat…</div>}
                   {!dashLoading && last7.map((d)=>(
@@ -769,7 +647,7 @@ img{display:block;margin:0 auto 6px;height:42px}
                 {!!customerPhone && (
                   <div className="text-xs text-neutral-600 mb-2">
                     {customerPoints===null ? "Mencari pelanggan…" :
-                      customerPoints===0 && !customerName ? "Belum terdaftar — isi nama untuk dibuat otomatis saat transaksi." :
+                      (customerPoints===0 && !customerName) ? "Belum terdaftar — isi nama untuk dibuat otomatis saat transaksi." :
                       <>Poin: <b>{customerPoints}</b> {customerName?`— ${customerName}`:""}</>}
                   </div>
                 )}
@@ -821,18 +699,20 @@ img{display:block;margin:0 auto 6px;height:42px}
                     <input type="number" className="border rounded-lg px-2 py-1 w-28" value={discount} onChange={e=>setDiscount(Number(e.target.value)||0)} />
                   </label>
 
-                  {/* redeem */}
-                  <label className="flex items-center justify-between text-sm">
-                    <span>Redeem Poin</span>
-                    <input type="number" className="border rounded-lg px-2 py-1 w-28"
-                      value={redeemPts}
-                      onChange={(e)=>{
-                        const v = Math.max(0, Number(e.target.value)||0);
-                        const maxPts = (customerPoints||0);
-                        setRedeemPts(Math.min(v, maxPts));
-                      }} />
-                  </label>
-                  {redeemPts>0 && <div className="text-xs text-neutral-500">Redeem: {redeemPts} pts = {IDR(redeemValue)}</div>}
+                  {/* redeem points */}
+                  {customerPoints!==null && (customerPoints>0 || redeemPts>0) && (
+                    <div className="flex items-center justify-between text-sm">
+                      <span>Tukar Poin (tersedia: {customerPoints})</span>
+                      <input type="number" className="border rounded-lg px-2 py-1 w-28"
+                        value={redeemPts} min={0} max={customerPoints||0}
+                        onChange={e=>setRedeemPts(Math.max(0, Math.min(Number(e.target.value)||0, customerPoints||0)))} />
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between text-sm">
+                    <span>Redeem Nilai</span>
+                    <span className="font-medium">-{IDR(redeemValue)}</span>
+                  </div>
 
                   <div className="flex items-center justify-between text-lg font-semibold">
                     <span>Total</span><span>{IDR(total)}</span>
@@ -868,7 +748,7 @@ img{display:block;margin:0 auto 6px;height:42px}
                     <button className="px-3 py-2 rounded-lg border" disabled={cart.length===0} onClick={()=>printReceipt({
                       outlet: OUTLET, shiftId: activeShift?.id||null, cashierEmail: user.email, customerPhone: customerPhone||null, customerName,
                       time: null, items: cart.map(i=>({ name:i.name, price:i.price, qty:i.qty, ...(i.note?{note:i.note}:{}) })),
-                      subtotal, discount: effectiveDiscount||0, tax: taxVal, service: svcVal, total, payMethod, cash, change
+                      subtotal, discount, tax: taxVal, service: svcVal, total, payMethod, cash, change
                     })}>Print Draf</button>
                     <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50" disabled={cart.length===0} onClick={finalize}>Selesai & Cetak</button>
                   </div>
@@ -915,7 +795,7 @@ img{display:block;margin:0 auto 6px;height:42px}
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setEditProduct({ id: uid(), name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
+              <button className="px-3 py-2 rounded-lg border" onClick={()=>upsertProduct({ name:"Produk Baru", price:10000, category:"Signature", active:true })}>+ Tambah</button>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -927,12 +807,8 @@ img{display:block;margin:0 auto 6px;height:42px}
                       <td>{p.category||"-"}</td>
                       <td className="text-right">{IDR(p.price)}</td>
                       <td className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <button className="px-2 py-1 border rounded" onClick={()=>setEditProduct({...p})}>Edit</button>
-                          <button className="px-2 py-1 border rounded" onClick={()=>openRecipeEditor(p)}>Resep</button>
-                          <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
-                          <button className="px-2 py-1 border rounded" onClick={()=>deleteProductHard(p.id)}>Hapus</button>
-                        </div>
+                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>upsertProduct({ id:p.id, name:prompt("Nama", p.name)||p.name, price:Number(prompt("Harga", String(p.price))||p.price), category:prompt("Kategori", p.category||"Signature")||p.category||"Signature", active:p.active })}>Edit</button>
+                        <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
                       </td>
                     </tr>
                   ))}
@@ -948,7 +824,15 @@ img{display:block;margin:0 auto 6px;height:42px}
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Inventori</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setEditIngredient({ id: uid(), name:"Bahan Baru", unit:"gr", stock:0, min:0 })}>+ Tambah</button>
+              <button
+                className="px-3 py-2 rounded-lg border"
+                onClick={()=>upsertIngredient({
+                  name: prompt("Nama bahan") || "Bahan",
+                  unit: prompt("Satuan (gr/ml/pcs)") || "pcs",
+                  stock: Number(prompt("Stok awal", "0") || 0),
+                  min: Number(prompt("Stok minimum untuk peringatan", "0") || 0),
+                })}
+              >+ Tambah</button>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
@@ -961,48 +845,21 @@ img{display:block;margin:0 auto 6px;height:42px}
                       <td className="text-right">{i.stock}</td>
                       <td className="text-right">{i.min||0}</td>
                       <td className="text-right">
-                        <div className="flex justify-end gap-2">
-                          <button className="px-2 py-1 border rounded" onClick={()=>setEditIngredient({...i})}>Edit</button>
-                          <button className="px-2 py-1 border rounded" onClick={()=>deleteIngredientHard(i.id)}>Hapus</button>
-                        </div>
+                        <button className="px-2 py-1 border rounded mr-2"
+                          onClick={()=>upsertIngredient({
+                            id:i.id,
+                            name: prompt("Nama bahan", i.name) || i.name,
+                            unit: prompt("Satuan (gr/ml/pcs)", i.unit) || i.unit,
+                            stock: Number(prompt("Stok", String(i.stock)) || i.stock),
+                            min: Number(prompt("Stok minimum", String(i.min||0)) || i.min||0),
+                          })}
+                        >Edit</button>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
               {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
-            </div>
-          </section>
-        )}
-
-        {/* SETTINGS (whitelist staf sederhana) */}
-        {tab==="settings" && isOwner && (
-          <section className="bg-white rounded-2xl border p-3 space-y-3">
-            <h2 className="text-lg font-semibold">Pengaturan & Staf</h2>
-            <div className="p-3 rounded-lg border bg-neutral-50">
-              <div className="font-medium mb-2">Whitelist Staf (users)</div>
-              <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Email</th><th>Role</th></tr></thead>
-                <tbody>
-                  {staffList.map(u=>(
-                    <tr key={u.email} className="border-b">
-                      <td className="py-2">{u.email}</td>
-                      <td>{u.role}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div className="mt-3 flex gap-2">
-                <button className="px-3 py-2 rounded-lg border" onClick={async ()=>{
-                  const em = prompt("Email staf baru:")?.trim();
-                  if(!em) return;
-                  await setDoc(doc(db,"users", em), { email: em, role:"staff", outlet: OUTLET }, { merge:true });
-                  alert("Ditambahkan. Buat akun Auth via Firebase Console (Email/Password) dengan email yang sama.");
-                }}>+ Tambah Staf</button>
-              </div>
-              <p className="text-xs text-neutral-500 mt-2">
-                * Ini hanya whitelist tampilan. Pembuatan akun Auth tetap lewat Firebase Console agar tidak logout owner.
-              </p>
             </div>
           </section>
         )}
@@ -1014,96 +871,6 @@ img{display:block;margin:0 auto 6px;height:42px}
           <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
             <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
             <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Edit Product */}
-      {editProduct && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={()=>setEditProduct(null)}>
-          <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
-            <h3 className="font-semibold mb-3">{editProduct.id && products.find(p=>p.id===editProduct.id) ? "Edit Produk" : "Tambah Produk"}</h3>
-            <div className="grid gap-2">
-              <label className="text-sm">Nama
-                <input className="border rounded-lg px-3 py-2 w-full" value={editProduct.name||""} onChange={e=>setEditProduct({...editProduct, name:e.target.value})}/>
-              </label>
-              <label className="text-sm">Kategori
-                <input className="border rounded-lg px-3 py-2 w-full" value={editProduct.category||"Signature"} onChange={e=>setEditProduct({...editProduct, category:e.target.value})}/>
-              </label>
-              <label className="text-sm">Harga
-                <input type="number" className="border rounded-lg px-3 py-2 w-full" value={Number(editProduct.price||0)} onChange={e=>setEditProduct({...editProduct, price:Number(e.target.value)||0})}/>
-              </label>
-              <label className="text-sm flex items-center gap-2">
-                <input type="checkbox" checked={editProduct.active!==false} onChange={e=>setEditProduct({...editProduct, active:e.target.checked})}/>
-                Aktif
-              </label>
-            </div>
-            <div className="mt-3 flex gap-2 justify-end">
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setEditProduct(null)}>Batal</button>
-              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={async ()=>{
-                await upsertProduct(editProduct as any);
-                setEditProduct(null);
-              }}>Simpan</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Edit Ingredient */}
-      {editIngredient && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={()=>setEditIngredient(null)}>
-          <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
-            <h3 className="font-semibold mb-3">{editIngredient.id && ingredients.find(i=>i.id===editIngredient.id) ? "Edit Bahan" : "Tambah Bahan"}</h3>
-            <div className="grid gap-2">
-              <label className="text-sm">Nama
-                <input className="border rounded-lg px-3 py-2 w-full" value={editIngredient.name||""} onChange={e=>setEditIngredient({...editIngredient, name:e.target.value})}/>
-              </label>
-              <label className="text-sm">Satuan
-                <input className="border rounded-lg px-3 py-2 w-full" value={editIngredient.unit||"gr"} onChange={e=>setEditIngredient({...editIngredient, unit:e.target.value})}/>
-              </label>
-              <label className="text-sm">Stok
-                <input type="number" className="border rounded-lg px-3 py-2 w-full" value={Number(editIngredient.stock||0)} onChange={e=>setEditIngredient({...editIngredient, stock:Number(e.target.value)||0})}/>
-              </label>
-              <label className="text-sm">Min. Stok
-                <input type="number" className="border rounded-lg px-3 py-2 w-full" value={Number(editIngredient.min||0)} onChange={e=>setEditIngredient({...editIngredient, min:Number(e.target.value)||0})}/>
-              </label>
-            </div>
-            <div className="mt-3 flex gap-2 justify-end">
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setEditIngredient(null)}>Batal</button>
-              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={async ()=>{
-                await upsertIngredient(editIngredient as any);
-                setEditIngredient(null);
-              }}>Simpan</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Modal Recipe Editor */}
-      {editRecipeFor && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={()=>setEditRecipeFor(null)}>
-          <div className="bg-white rounded-2xl p-4 w-full max-w-xl" onClick={e=>e.stopPropagation()}>
-            <h3 className="font-semibold mb-3">Resep: {editRecipeFor.name}</h3>
-            <div className="space-y-2">
-              {recipeDraft.map((r,idx)=>(
-                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
-                  <select className="col-span-6 border rounded-lg px-2 py-2"
-                    value={r.ingredientId}
-                    onChange={e=>updateRecipeRow(idx,{ ingredientId: e.target.value })}>
-                    <option value="">— pilih bahan —</option>
-                    {ingredients.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
-                  </select>
-                  <input type="number" className="col-span-3 border rounded-lg px-2 py-2" placeholder="Qty" value={r.qty} onChange={e=>updateRecipeRow(idx,{ qty: Number(e.target.value)||0 })}/>
-                  <input className="col-span-2 border rounded-lg px-2 py-2" placeholder="Unit" value={r.unit||""} onChange={e=>updateRecipeRow(idx,{ unit: e.target.value })}/>
-                  <button className="col-span-1 border rounded-lg px-2 py-2" onClick={()=>removeRecipeRow(idx)}>x</button>
-                </div>
-              ))}
-              <button className="px-3 py-2 rounded-lg border" onClick={addRecipeRow}>+ Tambah Bahan</button>
-            </div>
-            <div className="mt-3 flex gap-2 justify-end">
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setEditRecipeFor(null)}>Batal</button>
-              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={saveRecipe}>Simpan Resep</button>
-            </div>
           </div>
         </div>
       )}
