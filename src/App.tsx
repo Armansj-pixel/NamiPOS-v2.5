@@ -1,5 +1,5 @@
-// src/App.tsx — NamiPOS V2.4 (Public Order Menu)
-// =================================================
+// src/App.tsx — NamiPOS V2.4.1 (Public Order + Orders Inbox)
+// ==========================================================
 import React, { useEffect, useMemo, useState } from "react";
 import {
   getAuth,
@@ -12,6 +12,8 @@ import {
   collection,
   query,
   where,
+  orderBy,
+  onSnapshot,
   getDocs,
   addDoc,
   updateDoc,
@@ -39,8 +41,11 @@ export default function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState("kasir");
+  const [activeTab, setActiveTab] = useState<
+    "dashboard" | "kasir" | "riwayat" | "produk" | "inventori" | "resep" | "orders"
+  >("kasir");
   const [shiftOpen, setShiftOpen] = useState(false);
+  const [activeShiftId, setActiveShiftId] = useState<string | null>(null);
 
   // Rute publik: /order
   const isPublicOrder =
@@ -52,9 +57,29 @@ export default function App() {
     const unsub = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
+      if (u) checkShift();
     });
     return () => unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function checkShift() {
+    // cari shift aktif
+    const qy = query(
+      collection(db, "shifts"),
+      where("outlet", "==", OUTLET),
+      where("isOpen", "==", true),
+      orderBy("openAt", "desc")
+    );
+    const snap = await getDocs(qy);
+    if (!snap.empty) {
+      setShiftOpen(true);
+      setActiveShiftId(snap.docs[0].id);
+    } else {
+      setShiftOpen(false);
+      setActiveShiftId(null);
+    }
+  }
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -69,10 +94,9 @@ export default function App() {
   }
 
   async function handleOpenShift() {
-    const code = prompt("Masukkan kode shift:");
-    if (!code) return;
+    const code = prompt("Masukkan kode shift (opsional):") || "";
     try {
-      await addDoc(collection(db, "shifts"), {
+      const ref = await addDoc(collection(db, "shifts"), {
         outlet: OUTLET,
         openedBy: user?.email,
         openAt: serverTimestamp(),
@@ -80,6 +104,7 @@ export default function App() {
         code,
       });
       setShiftOpen(true);
+      setActiveShiftId(ref.id);
       alert("Shift dibuka!");
     } catch (e: any) {
       alert("Gagal buka shift: " + e.message);
@@ -87,23 +112,19 @@ export default function App() {
   }
   async function handleCloseShift() {
     try {
-      // cari shift aktif
-      const q = query(
-        collection(db, "shifts"),
-        where("outlet", "==", OUTLET),
-        where("isOpen", "==", true)
-      );
-      const snap = await getDocs(q);
-      if (snap.empty) {
+      if (!activeShiftId) {
+        await checkShift();
+      }
+      if (!activeShiftId) {
         alert("Tidak ada shift aktif.");
         return;
       }
-      const d = snap.docs[0];
-      await updateDoc(doc(db, "shifts", d.id), {
+      await updateDoc(doc(db, "shifts", activeShiftId), {
         isOpen: false,
         closeAt: serverTimestamp(),
       });
       setShiftOpen(false);
+      setActiveShiftId(null);
       alert("Shift ditutup!");
     } catch (e: any) {
       alert("Gagal tutup shift: " + e.message);
@@ -178,13 +199,13 @@ export default function App() {
           </div>
         </div>
         <nav className="space-x-2">
-          {["Dashboard", "Kasir", "Riwayat", "Produk", "Inventori", "Resep"].map(
+          {["Dashboard", "Kasir", "Riwayat", "Produk", "Inventori", "Resep", "Orders"].map(
             (tab) => (
               <button
                 key={tab}
-                onClick={() => setActiveTab(tab.toLowerCase())}
+                onClick={() => setActiveTab(tab.toLowerCase() as any)}
                 className={`px-3 py-1 rounded border ${
-                  activeTab === tab.toLowerCase()
+                  activeTab === (tab.toLowerCase() as any)
                     ? "bg-green-100 border-green-700"
                     : "bg-white"
                 }`}
@@ -237,13 +258,20 @@ export default function App() {
           )}
         </div>
 
-        {/* Placeholder tab — jaga fitur lama tetap ada */}
+        {/* Tab konten */}
         {activeTab === "dashboard" && <div>Dashboard Ringkasan</div>}
         {activeTab === "kasir" && <div>Kasir Aktif</div>}
         {activeTab === "riwayat" && <div>Riwayat Transaksi</div>}
         {activeTab === "produk" && <div>Manajemen Produk</div>}
         {activeTab === "inventori" && <div>Inventori & Stok</div>}
         {activeTab === "resep" && <div>Manajemen Resep</div>}
+        {activeTab === "orders" && (
+          <OrdersInbox
+            outlet={OUTLET}
+            activeShiftId={activeShiftId}
+            cashierEmail={user.email}
+          />
+        )}
       </section>
     </div>
   );
@@ -258,7 +286,6 @@ type Product = {
   active?: boolean;
   outlet?: string;
 };
-
 type CartItem = { productId: string; name: string; price: number; qty: number };
 
 function PublicOrder({ outlet }: { outlet: string }) {
@@ -273,11 +300,10 @@ function PublicOrder({ outlet }: { outlet: string }) {
   const [orderId, setOrderId] = useState<string | null>(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        // ambil produk outlet; filter active di sisi klien
-        const q = query(collection(db, "products"), where("outlet", "==", outlet));
-        const snap = await getDocs(q);
+    const q = query(collection(db, "products"), where("outlet", "==", outlet));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
         const rows: Product[] = snap.docs.map((d) => {
           const x = d.data() as any;
           return {
@@ -290,12 +316,14 @@ function PublicOrder({ outlet }: { outlet: string }) {
           };
         });
         setProducts(rows.filter((p) => p.active !== false));
-      } catch (e: any) {
-        alert("Gagal memuat produk: " + e.message);
-      } finally {
+        setLoading(false);
+      },
+      (err) => {
+        alert("Gagal memuat produk: " + err.message);
         setLoading(false);
       }
-    })();
+    );
+    return () => unsub();
   }, [outlet]);
 
   const shown = useMemo(
@@ -558,3 +586,44 @@ function PublicOrder({ outlet }: { outlet: string }) {
     </div>
   );
 }
+
+// ================== ORDERS INBOX (STAFF) ===================
+type OrderDoc = {
+  id: string;
+  outlet: string;
+  origin: "public" | "internal";
+  customer: { name: string; phone: string; address?: string };
+  items: { productId: string; name: string; price: number; qty: number }[];
+  subtotal: number;
+  total: number;
+  status: "pending" | "accepted" | "preparing" | "completed" | "rejected";
+  createdAt?: any;
+};
+
+function OrdersInbox({
+  outlet,
+  activeShiftId,
+  cashierEmail,
+}: {
+  outlet: string;
+  activeShiftId: string | null;
+  cashierEmail: string;
+}) {
+  const [rows, setRows] = useState<OrderDoc[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState<
+    "all" | "pending" | "accepted" | "preparing"
+  >("pending");
+
+  useEffect(() => {
+    const qy = query(
+      collection(db, "orders"),
+      where("outlet", "==", outlet),
+      orderBy("createdAt", "desc")
+    );
+    const unsub = onSnapshot(
+      qy,
+      (snap) => {
+        const list: OrderDoc[] = snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data
