@@ -1,8 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
-  addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit,
-  onSnapshot, orderBy, query, serverTimestamp, setDoc, startAfter, updateDoc,
-  where, Timestamp
+  addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot,
+  orderBy, query, serverTimestamp, setDoc, startAfter, Timestamp, updateDoc, where
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
@@ -10,44 +9,53 @@ import { auth, db } from "./lib/firebase";
 /* ==========================
    KONFIGURASI
 ========================== */
-const APP_NAME = "NamiPOS";
 const OUTLET = "MTHaryono";
 const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const LOGO_SRC = "/logo.png";
-const QRIS_IMG_SRC = "/qris.png";
-const SHIPPING_FEE_PER_KM = 3000; // 3k/km
+const QRIS_IMG_SRC = "/qris.png";   // siapkan di /public
+const LOGO_IMG_SRC = "/logo.png";   // opsional, siapkan di /public
 
 /* ==========================
-   TIPE DATA
+   TYPES
 ========================== */
 type Product = {
   id: string;
-  outlet: string;
   name: string;
   price: number;
   category?: string;
   active?: boolean;
-  imageUrl?: string;
+  imgUrl?: string;
+  outlet?: string;
 };
-type Ingredient = { id: string; name: string; unit: string; stock: number; min?: number; outlet: string };
-type RecipeItem = { ingredientId: string; qty: number }; // pengurangan stok per 1 porsi
-type Recipe = { productId: string; items: RecipeItem[] };
-type CartItem = { id: string; productId: string; name: string; price: number; qty: number; note?: string };
+
+type Ingredient = {
+  id: string;
+  name: string;
+  unit: string;
+  stock: number;
+  min?: number;
+  outlet?: string;
+};
+
+type CartItem = {
+  id: string;
+  productId: string;
+  name: string;
+  price: number;
+  qty: number;
+  note?: string;
+};
 
 type Shift = {
   id: string;
   outlet: string;
   openBy: string;
-  openAt: Timestamp | null;
+  openAt: Timestamp;
   closeAt?: Timestamp | null;
-  isOpen: boolean;
   openCash?: number;
-  recap?: {
-    omzet: number; trx: number; cash: number; qris: number;
-  }
+  isOpen: boolean;
 };
 
 type Sale = {
@@ -59,49 +67,240 @@ type Sale = {
   customerName?: string | null;
   time: Timestamp | null;
   items: { name: string; price: number; qty: number; note?: string }[];
-  subtotal: number; discount: number; tax: number; service: number; total: number;
+  subtotal: number;
+  discount: number;
+  tax: number;
+  service: number;
+  total: number;
   payMethod: "cash" | "ewallet" | "qris";
-  cash?: number; change?: number;
+  cash?: number;
+  change?: number;
+  source?: "pos" | "order";
+  orderId?: string;
+  deliveryFee?: number;
 };
 
-type DeliveryOrder = {
-  id?: string;
+type Recipe = {
+  productId: string;
+  items: { ingredientId: string; qty: number }[];
+};
+
+type Order = {
+  id: string;
   outlet: string;
-  createdAt: Timestamp | null;
-  customer: { name: string; phone: string; address: string; distanceKm?: number };
-  items: { name: string; price: number; qty: number }[];
-  subtotal: number; discount: number; total: number;
+  items: { productId?: string; name: string; price: number; qty: number }[];
+  customer: { name: string; phone: string; address: string };
   payMethod: "qris" | "cod";
-  status: "new" | "accepted" | "preparing" | "on_delivery" | "done" | "canceled";
+  status: "pending" | "confirmed" | "delivering" | "done" | "cancelled";
+  createdAt: Timestamp | null;
+  assignedShiftId?: string | null;
   note?: string;
-  // v2.5.2
-  shippingFee?: number;
-  paid?: boolean;
-  linkedSaleId?: string;
+  distanceKm?: number | null;
+  deliveryFee?: number | null;
 };
 
 /* ==========================
-   UTIL
+   UTILITIES
 ========================== */
 const uid = () => Math.random().toString(36).slice(2, 10);
-const IDR = (n: number) => new Intl.NumberFormat("id-ID",{style:"currency",currency:"IDR",maximumFractionDigits:0}).format(n||0);
+const IDR = (n: number) =>
+  new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
+
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo = (n:number) => { const x=new Date(); x.setDate(x.getDate()-n); return x; };
-const computeShippingFee = (distanceKm?: number) => (!distanceKm || distanceKm<=0) ? 0 : Math.round(distanceKm * SHIPPING_FEE_PER_KM);
+
+const qparam = (key:string, dflt="") =>
+  new URLSearchParams(window.location.search).get(key) ?? dflt;
 
 /* ==========================
-   APP
+   PUBLIC ORDER (tanpa login)
+========================== */
+function PublicOrder(){
+  const outlet = qparam("outlet", OUTLET);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [cart, setCart] = useState<{productId:string; id:string; name:string; price:number; qty:number}[]>([]);
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [address, setAddress] = useState("");
+  const [pay, setPay] = useState<"qris"|"cod">("qris");
+  const [distanceKm, setDistanceKm] = useState<number>(0);
+  const [perKm, setPerKm] = useState<number>(3000);
+
+  const deliveryFee = useMemo(()=> Math.max(0, Math.round((distanceKm||0)*(perKm||0))), [distanceKm, perKm]);
+  const subtotal = useMemo(()=> cart.reduce((s,i)=>s+i.price*i.qty,0), [cart]);
+  const grandTotal = subtotal + deliveryFee;
+
+  useEffect(()=>{
+    const qProd = query(
+      collection(db,"products"),
+      where("outlet","==",outlet),
+      where("active","==",true),
+      orderBy("name","asc")
+    );
+    const unsub = onSnapshot(qProd, snap=>{
+      const rows = snap.docs.map(d=>{
+        const x = d.data() as any;
+        return { id:d.id, name:x.name, price:x.price, category:x.category, active:x.active, imgUrl:x.imgUrl, outlet:x.outlet } as Product;
+      });
+      setProducts(rows);
+    });
+    return ()=>unsub();
+  },[outlet]);
+
+  const add = (p:Product)=> setCart(prev=>{
+    const exist = prev.find(x=>x.productId===p.id);
+    if(exist) return prev.map(x=> x.productId===p.id? {...x, qty:x.qty+1 }:x);
+    return [...prev, { productId:p.id, id:p.id, name:p.name, price:p.price, qty:1 }];
+  });
+  const inc = (id:string)=> setCart(prev=> prev.map(x=> x.id===id? {...x, qty:x.qty+1 }:x));
+  const dec = (id:string)=> setCart(prev=> prev.map(x=> x.id===id? {...x, qty:Math.max(1,x.qty-1) }:x));
+  const rm  = (id:string)=> setCart(prev=> prev.filter(x=> x.id!==id));
+
+  async function submit(){
+    if(!name.trim() || !phone.trim() || !address.trim()){ alert("Nama/HP/Alamat wajib diisi."); return; }
+    if(cart.length===0){ alert("Keranjang kosong."); return; }
+    try{
+      await addDoc(collection(db,"orders"), {
+        outlet,
+        items: cart.map(i=>({ productId:i.productId, name:i.name, price:i.price, qty:i.qty })),
+        customer: { name:name.trim(), phone:phone.trim(), address:address.trim() },
+        payMethod: pay,
+        status: "pending",
+        createdAt: serverTimestamp(),
+        distanceKm: distanceKm || null,
+        deliveryFee: deliveryFee || null,
+      });
+      alert("Pesanan berhasil dibuat! Kami akan konfirmasi secepatnya.");
+      setCart([]); setName(""); setPhone(""); setAddress("");
+    }catch(e:any){
+      alert("Gagal membuat pesanan: "+(e?.message||e));
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-neutral-50">
+      <header className="sticky top-0 bg-white border-b px-4 py-3 flex justify-between">
+        <div className="flex items-center gap-2">
+          <img src={LOGO_IMG_SRC} alt="logo" className="h-7 w-7 rounded-md object-contain" onError={(e)=>{(e.currentTarget as HTMLImageElement).style.display="none"}}/>
+          <div className="font-bold">NamiPOS — Order • {outlet}</div>
+        </div>
+        <a href="/" className="text-sm underline">Masuk POS</a>
+      </header>
+
+      <main className="max-w-6xl mx-auto p-4 grid grid-cols-1 md:grid-cols-12 gap-4">
+        {/* Produk */}
+        <section className="md:col-span-7">
+          <div className="bg-white border rounded-2xl p-3">
+            <div className="font-semibold mb-2">Menu</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-3">
+              {products.map(p=>(
+                <button key={p.id} onClick={()=>add(p)} className="text-left rounded-2xl border bg-white p-3 hover:shadow">
+                  {p.imgUrl
+                    ? <img src={p.imgUrl} alt={p.name} className="h-24 w-full object-cover rounded-xl mb-2"/>
+                    : <div className="h-24 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2"/>}
+                  <div className="font-medium leading-tight">{p.name}</div>
+                  <div className="mt-1 font-semibold">{IDR(p.price)}</div>
+                </button>
+              ))}
+              {products.length===0 && <div className="text-sm text-neutral-500">Belum ada menu aktif untuk outlet ini.</div>}
+            </div>
+          </div>
+        </section>
+
+        {/* Keranjang & Data */}
+        <section className="md:col-span-5">
+          <div className="bg-white border rounded-2xl p-3 space-y-3">
+            <div className="font-semibold">Keranjang</div>
+            {cart.length===0 ? (
+              <div className="text-sm text-neutral-500">Belum ada item.</div>
+            ) : (
+              <div className="space-y-2">
+                {cart.map(i=>(
+                  <div key={i.id} className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2">
+                    <div className="col-span-6"><div className="font-medium">{i.name}</div></div>
+                    <div className="col-span-2 text-right text-sm">{IDR(i.price)}</div>
+                    <div className="col-span-3 flex items-center justify-end gap-2">
+                      <button className="px-2 py-1 border rounded" onClick={()=>dec(i.id)}>-</button>
+                      <div className="w-8 text-center font-medium">{i.qty}</div>
+                      <button className="px-2 py-1 border rounded" onClick={()=>inc(i.id)}>+</button>
+                    </div>
+                    <div className="col-span-1 text-right">
+                      <button className="px-2 py-1 border rounded" onClick={()=>rm(i.id)}>x</button>
+                    </div>
+                  </div>
+                ))}
+                <div className="flex justify-between"><span>Subtotal</span><span className="font-semibold">{IDR(subtotal)}</span></div>
+              </div>
+            )}
+
+            <div className="h-px bg-neutral-200"/>
+            <div className="font-semibold">Data Pengantaran</div>
+            <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama lengkap" value={name} onChange={e=>setName(e.target.value)} />
+            <input className="border rounded-lg px-3 py-2 w-full" placeholder="No. HP/WhatsApp" value={phone} onChange={e=>setPhone(e.target.value)} />
+            <textarea className="border rounded-lg px-3 py-2 w-full" placeholder="Alamat lengkap" rows={3} value={address} onChange={e=>setAddress(e.target.value)} />
+
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-sm">Jarak (km)
+                <input type="number" min={0} step="0.1" className="border rounded-lg px-3 py-2 w-full"
+                  value={distanceKm} onChange={e=>setDistanceKm(Number(e.target.value)||0)} />
+              </label>
+              <label className="text-sm">Tarif/km
+                <input type="number" min={0} step="100" className="border rounded-lg px-3 py-2 w-full"
+                  value={perKm} onChange={e=>setPerKm(Number(e.target.value)||0)} />
+              </label>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <label className="border rounded-lg p-2 flex items-center gap-2">
+                <input type="radio" name="pay" value="qris" checked={pay==="qris"} onChange={()=>setPay("qris")} />
+                <span>Bayar Online (QRIS)</span>
+              </label>
+              <label className="border rounded-lg p-2 flex items-center gap-2">
+                <input type="radio" name="pay" value="cod" checked={pay==="cod"} onChange={()=>setPay("cod")} />
+                <span>COD</span>
+              </label>
+            </div>
+
+            <div className="flex justify-between text-sm">
+              <span>Ongkir</span><span>{IDR(deliveryFee)}</span>
+            </div>
+            <div className="flex justify-between font-semibold">
+              <span>Total</span><span>{IDR(grandTotal)}</span>
+            </div>
+
+            <button
+              disabled={cart.length===0}
+              onClick={submit}
+              className="w-full py-3 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
+            >
+              Pesan Sekarang
+            </button>
+            <div className="text-xs text-neutral-500 text-center">
+              Dengan menekan tombol, Anda setuju pesanan diproses sesuai ketersediaan.
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+/* ==========================
+   APP (POS + Admin)
 ========================== */
 export default function App() {
+  // Halaman publik /order tanpa login
+  if (window.location.pathname.startsWith("/order")) {
+    return <PublicOrder />;
+  }
+
   /* ---- auth ---- */
   const [user, setUser] = useState<null | { email: string }>(null);
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
-  const [deliveryTab, setDeliveryTab] = useState<"admin"|"public">("admin");
-  const [publicOrderMode, setPublicOrderMode] = useState(false);
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory"|"orders">("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
@@ -110,7 +309,6 @@ export default function App() {
   /* ---- master ---- */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-  const [recipes, setRecipes] = useState<Recipe[]>([]);
 
   /* ---- POS ---- */
   const [queryText, setQueryText] = useState("");
@@ -142,15 +340,27 @@ export default function App() {
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
-  /* ---- delivery ---- */
-  const [orders, setOrders] = useState<DeliveryOrder[]>([]);
-  // public order form
-  const [ordName, setOrdName] = useState("");
-  const [ordPhone, setOrdPhone] = useState("");
-  const [ordAddress, setOrdAddress] = useState("");
-  const [ordDistance, setOrdDistance] = useState<number | undefined>(undefined);
-  const [ordPay, setOrdPay] = useState<"qris"|"cod">("qris");
-  const [ordNote, setOrdNote] = useState("");
+  /* ---- Orders (admin) ---- */
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [ordersLoading] = useState(false);
+  const lastOrderTimeRef = useRef<number>(0);
+  const beep = useMemo(()=>{
+    try{ return new Audio("data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABYAAAAAAABERERERERERERERERERERERERERERERERERERER"); }catch{ return null; }
+  },[]);
+  const [orderFilter, setOrderFilter] = useState<"all"|"pending"|"confirmed"|"delivering"|"done"|"cancelled">("pending");
+  const [orderSearch, setOrderSearch] = useState("");
+  const filteredOrders = useMemo(()=>{
+    let rows = orders;
+    if(orderFilter!=="all") rows = rows.filter(o=>o.status===orderFilter);
+    if(orderSearch.trim()){
+      const q = orderSearch.trim().toLowerCase();
+      rows = rows.filter(o =>
+        (o.customer?.name||"").toLowerCase().includes(q) ||
+        (o.customer?.phone||"").toLowerCase().includes(q)
+      );
+    }
+    return rows;
+  }, [orders, orderFilter, orderSearch]);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -167,25 +377,9 @@ export default function App() {
      AUTH WATCH
   =========================== */
   useEffect(()=>{
-    const unsub = onAuthStateChanged(auth, u=>{
-      setUser(u?.email? {email:u.email}: null);
-    });
+    const unsub = onAuthStateChanged(auth, u=> setUser(u?.email? {email:u.email}: null));
     return () => unsub();
   },[]);
-
-  /* ==========================
-     PUBLIC ORDER DETECT
-  =========================== */
-  useEffect(() => {
-    const u = new URL(window.location.href);
-    const q = u.searchParams.get("order");
-    const hash = window.location.hash.replace("#", "");
-    if (q === "1" || hash === "order" || u.pathname.endsWith("/order")) {
-      setPublicOrderMode(true);
-      setTab("pos");
-      setDeliveryTab("public");
-    }
-  }, []);
 
   /* ==========================
      LOAD DATA AFTER LOGIN
@@ -193,16 +387,18 @@ export default function App() {
   useEffect(()=>{
     if(!user) return;
 
-    const qProd = query(collection(db,"products"), where("outlet","==",OUTLET), orderBy("name","asc"));
+    // products
+    const qProd = query(collection(db,"products"), where("outlet","==",OUTLET));
     const unsubProd = onSnapshot(qProd, snap=>{
       const rows: Product[] = snap.docs.map(d=>{
         const x = d.data() as any;
-        return { id:d.id, outlet:x.outlet, name:x.name, price:x.price, category:x.category, active:x.active, imageUrl:x.imageUrl };
+        return { id:d.id, name:x.name, price:x.price, category:x.category, active:x.active, imgUrl:x.imgUrl, outlet:x.outlet };
       });
       setProducts(rows);
     }, err=>alert("Memuat produk gagal.\n"+(err.message||err)));
 
-    const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET), orderBy("name","asc"));
+    // ingredients
+    const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
     const unsubIng = onSnapshot(qIng, snap=>{
       const rows: Ingredient[] = snap.docs.map(d=>{
         const x = d.data() as any;
@@ -211,16 +407,50 @@ export default function App() {
       setIngredients(rows);
     }, err=>alert("Memuat inventori gagal.\n"+(err.message||err)));
 
-    const qRec = query(collection(db,"recipes"), where("outlet","==",OUTLET));
-    const unsubRec = onSnapshot(qRec, s=>{
-      const list = s.docs.map(d=> d.data() as Recipe);
-      setRecipes(list);
-    });
+    // orders
+    const qOrders = query(
+      collection(db, "orders"),
+      where("outlet","==", OUTLET),
+      orderBy("createdAt", "desc"),
+      limit(100)
+    );
+    const unsubOrders = onSnapshot(qOrders, snap=>{
+      const rows: Order[] = snap.docs.map(d=>{
+        const x = d.data() as any;
+        return {
+          id: d.id,
+          outlet: x.outlet,
+          items: x.items || [],
+          customer: x.customer || { name:"", phone:"", address:"" },
+          payMethod: x.payMethod || "qris",
+          status: x.status || "pending",
+          createdAt: x.createdAt || null,
+          assignedShiftId: x.assignedShiftId ?? null,
+          note: x.note || "",
+          distanceKm: x.distanceKm ?? null,
+          deliveryFee: x.deliveryFee ?? null,
+        } as Order;
+      });
 
+      const newest = rows[0]?.createdAt?.toMillis?.() ?? 0;
+      if(newest && newest > lastOrderTimeRef.current){
+        if(lastOrderTimeRef.current !== 0 && beep){
+          beep.currentTime = 0;
+          beep.play?.().catch(()=>{});
+        }
+        lastOrderTimeRef.current = newest;
+      } else if(lastOrderTimeRef.current === 0 && newest){
+        lastOrderTimeRef.current = newest;
+      }
+      setOrders(rows);
+    }, err=>console.warn("orders onSnapshot:", err));
+
+    // shift awal
     checkActiveShift().catch(e=>console.warn(e));
+    // dashboard awal
     loadDashboard().catch(()=>{});
 
-    return ()=>{ unsubProd(); unsubIng(); unsubRec(); };
+    return ()=>{ unsubProd(); unsubIng(); unsubOrders(); };
     // eslint-disable-next-line
   },[user?.email]);
 
@@ -257,8 +487,7 @@ export default function App() {
     const x = d.data() as any;
     setActiveShift({
       id:d.id, outlet:x.outlet, openBy:x.openBy,
-      openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true,
-      recap:x.recap
+      openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
     });
   }
 
@@ -275,32 +504,48 @@ export default function App() {
 
   async function closeShiftAction(){
     if(!activeShift?.id) return;
-    // hitung recap
-    const qS = query(
-      collection(db,"sales"),
-      where("outlet","==",OUTLET),
-      where("time", ">=", activeShift.openAt || Timestamp.fromDate(new Date(Date.now()-12*3600*1000))),
-      orderBy("time","desc")
-    );
-    const s = await getDocs(qS);
-    let omzet=0, trx=0, cashSum=0, qrisSum=0;
-    s.docs.forEach(d=>{
-      const x=d.data() as any;
-      omzet += x.total||0; trx++;
-      if(x.payMethod==="cash") cashSum += x.total||0;
-      if(x.payMethod==="qris" || x.payMethod==="ewallet") qrisSum += x.total||0;
-    });
-    await updateDoc(doc(db,"shifts", activeShift.id), {
-      isOpen:false, closeAt: serverTimestamp(),
-      recap: { omzet, trx, cash:cashSum, qris:qrisSum }
-    });
+    await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
     setActiveShift(null);
-    alert("Shift ditutup & rekap disimpan.");
-    loadDashboard().catch(()=>{});
+    alert("Shift ditutup.");
+    await loadDashboard().catch(()=>{});
   }
 
   /* ==========================
-     POS
+     RESEP & STOCK
+  =========================== */
+  async function getRecipeByProductId(productId: string): Promise<Recipe | null> {
+    try{
+      const snap = await getDocs(query(collection(db,"recipes"), where("productId","==",productId), limit(1)));
+      if(snap.empty) return null;
+      const d = snap.docs[0]; const x = d.data() as any;
+      return { productId: x.productId, items: (x.items||[]).map((r:any)=>({ ingredientId:r.ingredientId, qty:Number(r.qty)||0 })) };
+    }catch{ return null; }
+  }
+
+  async function deductStockForOrderItems(items: {productId?:string; qty:number}[]){
+    const need = new Map<string, number>();
+    for(const it of items){
+      if(!it.productId) continue;
+      const recipe = await getRecipeByProductId(it.productId);
+      if(!recipe) continue;
+      for(const r of recipe.items){
+        const cur = need.get(r.ingredientId)||0;
+        need.set(r.ingredientId, cur + (r.qty||0) * (it.qty||0));
+      }
+    }
+    for(const [ingredientId, qtyNeed] of need.entries()){
+      try{
+        const ref = doc(db,"ingredients", ingredientId);
+        const d = await getDoc(ref);
+        if(!d.exists()) continue;
+        const cur = (d.data() as any).stock || 0;
+        await updateDoc(ref, { stock: Math.max(0, Math.round(cur - qtyNeed)) });
+      }catch(e){}
+    }
+  }
+
+  /* ==========================
+     POS HANDLERS
   =========================== */
   function addToCart(p: Product){
     setCart(prev=>{
@@ -312,9 +557,12 @@ export default function App() {
   const inc = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:ci.qty+1 } : ci));
   const dec = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:Math.max(1, ci.qty-1) } : ci));
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
-  const clearCart = ()=> { setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput(""); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); };
+  const clearCart = ()=> {
+    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput("");
+    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
+  };
 
-  /* loyalty: auto lookup by phone */
+  // loyalty auto-lookup
   useEffect(()=>{
     if(!user) return;
     const phone = customerPhone.trim();
@@ -327,7 +575,7 @@ export default function App() {
           const c = s.data() as any;
           setCustomerName(c.name||""); setCustomerPoints(c.points||0);
         }else{
-          setCustomerPoints(0); // pelanggan baru
+          setCustomerPoints(0);
         }
       }catch(e:any){ console.warn("Lookup customer:", e?.message||e); }
     })();
@@ -348,8 +596,8 @@ td{padding:4px 0;border-bottom:1px dashed #ccc;font-size:12px}
 img.logo{display:block;margin:0 auto 6px;height:42px}
 </style></head><body>
 <div class="wrap">
-  <img src="${LOGO_SRC}" class="logo" onerror="this.style.display='none'"/>
-  <h2>${APP_NAME} — ${OUTLET}</h2>
+  <img src="${LOGO_IMG_SRC}" class="logo" onerror="this.style.display='none'"/>
+  <h2>NamiPOS — ${OUTLET}</h2>
   <div class="meta">${saleId||"DRAFT"}<br/>${new Date().toLocaleString("id-ID",{hour12:false})}</div>
   <hr/>
   <table style="width:100%;border-collapse:collapse">
@@ -358,6 +606,7 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
     ${rec.tax?`<tr class="tot"><td>Pajak</td><td></td><td style="text-align:right">${IDR(rec.tax)}</td></tr>`:""}
     ${rec.service?`<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(rec.service)}</td></tr>`:""}
     ${rec.discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(rec.discount)}</td></tr>`:""}
+    ${rec.deliveryFee?`<tr class="tot"><td>Ongkir</td><td></td><td style="text-align:right">${IDR(rec.deliveryFee)}</td></tr>`:""}
     <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(rec.total)}</td></tr>
     ${rec.payMethod==="cash"
       ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(rec.cash||0)}</td></tr>
@@ -365,29 +614,11 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
       : `<tr><td>Metode</td><td></td><td style='text-align:right'>${rec.payMethod.toUpperCase()}</td></tr>`
     }
   </table>
-  <p class="meta">Terima kasih! Follow @namipos</p>
+  <p class="meta">Terima kasih! — NamiPOS</p>
 </div>
 <script>window.print();</script>
 </body></html>`;
     w.document.write(html); w.document.close();
-  }
-
-  async function deductStockByRecipe(lineItems: {name:string; qty:number}[]) {
-    for (const it of lineItems) {
-      const prod = products.find(p => p.name === it.name);
-      if (!prod) continue;
-      const rec = recipes.find(r => r.productId === prod.id);
-      if (!rec) continue;
-      for (const ri of rec.items) {
-        const ingRef = doc(db, "ingredients", ri.ingredientId);
-        const ingSnap = await getDoc(ingRef);
-        if (ingSnap.exists()) {
-          const now = ingSnap.data() as any;
-          const newStock = (now.stock || 0) - (ri.qty * it.qty);
-          await updateDoc(ingRef, { stock: newStock });
-        }
-      }
-    }
   }
 
   async function finalize(){
@@ -408,32 +639,19 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
     try{
       const ref = await addDoc(collection(db,"sales"), payload as any);
 
-      // loyalty
+      // loyalty 15k = 1 poin
+      const totalForPoints = total;
       if((customerPhone.trim().length)>=8){
         const cref = doc(db,"customers", customerPhone.trim());
         const s = await getDoc(cref);
-        const pts = Math.floor(total/15000); // 15k = 1 poin
+        const pts = Math.floor(totalForPoints/15000);
         if(s.exists()){
           const c = s.data() as any;
-          const newPts = (c.points||0)+pts;
-          if (newPts >= 10) {
-            await setDoc(doc(db, "free_drinks", `FD-${ref.id}`), {
-              phone: customerPhone.trim(),
-              createdAt: serverTimestamp(),
-              reason: "10 points reward",
-              saleId: ref.id,
-            });
-            await updateDoc(cref, { points: newPts - 10 });
-          } else {
-            await updateDoc(cref, { points: newPts, lastVisit: serverTimestamp() });
-          }
+          await updateDoc(cref, { points:(c.points||0)+pts, name: customerName||c.name||"", lastVisit: serverTimestamp() });
         }else{
           await setDoc(cref, { phone: customerPhone.trim(), name: customerName||"Member", points: pts, lastVisit: serverTimestamp() });
         }
       }
-
-      // stock by recipe
-      await deductStockByRecipe(cart.map(i=>({name:i.name, qty:i.qty})));
 
       printReceipt(payload, ref.id);
       clearCart();
@@ -462,10 +680,10 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
           id:d.id,
           outlet:x.outlet, shiftId:x.shiftId??null, cashierEmail:x.cashierEmail,
           customerPhone:x.customerPhone??null, customerName:x.customerName??null,
-          time:x.time??null,
-          items:x.items||[],
+          time:x.time??null, items:x.items||[],
           subtotal:x.subtotal??0, discount:x.discount??0, tax:x.tax??0, service:x.service??0,
-          total:x.total??0, payMethod:x.payMethod??"cash", cash:x.cash??0, change:x.change??0
+          total:x.total??0, payMethod:x.payMethod??"cash", cash:x.cash??0, change:x.change??0,
+          source:x.source, orderId:x.orderId, deliveryFee:x.deliveryFee||0
         };
       });
       setHistoryRows(prev=> append? [...prev, ...rows] : rows);
@@ -477,18 +695,6 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
         alert("Gagal memuat riwayat: "+(e?.message||e));
       }
     }finally{ setHistoryLoading(false); }
-  }
-
-  async function deleteSale(id:string){
-    if(!isOwner) return alert("Hanya owner yang bisa hapus transaksi.");
-    if(!confirm("Hapus transaksi ini?")) return;
-    try{
-      await deleteDoc(doc(db,"sales", id));
-      setHistoryRows(prev=> prev.filter(x=>x.id!==id));
-      alert("Transaksi dihapus.");
-    }catch(e:any){
-      alert("Gagal hapus: "+(e?.message||e));
-    }
   }
 
   /* ==========================
@@ -524,7 +730,6 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
         .map(([name,qty])=>({name,qty}))
         .sort((a,b)=>b.qty-a.qty)
         .slice(0,5);
-
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
       // 7 hari terakhir
@@ -544,7 +749,8 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
       }
       s7.docs.forEach(d=>{
         const x=d.data() as any;
-        const key = new Date(x.time?.toDate?.() || Date.now()).toISOString().slice(0,10);
+        const t: Date = x.time?.toDate?.() || new Date();
+        const key = new Date(t).toISOString().slice(0,10);
         if(!bucket.has(key)) bucket.set(key,{omzet:0,trx:0});
         const cur = bucket.get(key)!;
         cur.omzet += x.total||0; cur.trx += 1;
@@ -557,26 +763,29 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
   }
 
   /* ==========================
-     OWNER: PRODUCTS / INVENTORY / RECIPE
+     ADMIN: Products & Inventory
   =========================== */
   async function upsertProduct(p: Partial<Product> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = p.id || uid();
     await setDoc(doc(db,"products", id), {
-      outlet: OUTLET, name: p.name||"Produk", price: Number(p.price)||0,
-      category: p.category||"Signature", active: p.active!==false, imageUrl: p.imageUrl||""
+      outlet: OUTLET,
+      name: p.name||"Produk",
+      price: Number(p.price)||0,
+      category: p.category||"Signature",
+      active: p.active!==false,
+      imgUrl: p.imgUrl || ""
     }, { merge:true });
   }
   async function deactivateProduct(id:string){
     if(!isOwner) return alert("Akses khusus owner.");
     await updateDoc(doc(db,"products", id), { active:false });
   }
-  async function removeProduct(id:string){
+  async function deleteProduct(id:string){
     if(!isOwner) return alert("Akses khusus owner.");
     if(!confirm("Hapus produk ini?")) return;
-    await deleteDoc(doc(db,"products", id));
+    await deleteDoc(doc(db, "products", id));
   }
-
   async function upsertIngredient(i: Partial<Ingredient> & { id?: string }){
     if(!isOwner) return alert("Akses khusus owner.");
     const id = i.id || uid();
@@ -585,162 +794,102 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
       stock: Number(i.stock)||0, min: Number(i.min)||0
     }, { merge:true });
   }
-  async function removeIngredient(id:string){
+  async function deleteIngredient(id:string){
     if(!isOwner) return alert("Akses khusus owner.");
     if(!confirm("Hapus bahan ini?")) return;
     await deleteDoc(doc(db,"ingredients", id));
   }
 
-  async function setRecipeForProduct(productId: string, items: RecipeItem[]){
-    if(!isOwner) return alert("Akses khusus owner.");
-    await setDoc(doc(db,"recipes", productId), { outlet: OUTLET, productId, items }, { merge:true });
-  }
-
   /* ==========================
-     DELIVERY (Public & Admin)
+     ORDER → SALE (Done)
   =========================== */
-  useEffect(() => {
-    if (!user || publicOrderMode) return;
-    const unsub = onSnapshot(
-      query(collection(db, "orders"), orderBy("createdAt", "desc"), limit(100)),
-      (s) => setOrders(s.docs.map(d => ({ id: d.id, ...(d.data() as any) })))
-    );
-    return () => unsub();
-  }, [user, publicOrderMode]);
+  async function createSaleFromOrder(o: Order) {
+    const items = o.items.map(i=>({ name:i.name, price:i.price, qty:i.qty }));
+    const subtotal = items.reduce((s,i)=>s + (i.price||0)*(i.qty||0), 0);
+    const discount = 0;
+    const tax = 0;
+    const service = 0;
+    const deliveryFee = o.deliveryFee||0;
+    const total = subtotal + deliveryFee;
 
-  async function submitPublicOrder() {
-    if (cart.length === 0) return alert("Keranjang kosong");
-    if (!ordName || !ordPhone || !ordAddress) return alert("Nama/HP/Alamat wajib diisi");
+    const pts = Math.floor(total/15000);
 
-    const subtotalPO = cart.reduce((s, i) => s + i.price * i.qty, 0);
-    const discountPO = 0;
-    const totalPO = subtotalPO;
-    try {
-      const payload: Omit<DeliveryOrder, "id"> = {
-        outlet: OUTLET,
-        createdAt: serverTimestamp() as any,
-        customer: { name: ordName, phone: ordPhone, address: ordAddress, distanceKm: ordDistance },
-        items: cart.map(i => ({ name: i.name, price: i.price, qty: i.qty })),
-        subtotal: subtotalPO,
-        discount: discountPO,
-        total: totalPO,
-        payMethod: ordPay,
-        status: "new",
-        note: ordNote || undefined,
-      };
-      await addDoc(collection(db, "orders"), payload as any);
-      alert("Pesanan berhasil dikirim!");
-      setCart([]); setOrdName(""); setOrdPhone(""); setOrdAddress("");
-      setOrdDistance(undefined); setOrdPay("qris"); setOrdNote("");
-    } catch (e: any) {
-      alert("Gagal mengirim pesanan: " + (e?.message || e));
-    }
-  }
-
-  async function setOrderStatus(id: string, status: DeliveryOrder["status"]) {
-    try { await updateDoc(doc(db, "orders", id), { status }); }
-    catch (e: any) { alert("Gagal update status: " + (e?.message || e)); }
-  }
-  async function deleteOrder(id: string) {
-    if (!confirm("Hapus pesanan ini?")) return;
-    try { await deleteDoc(doc(db, "orders", id)); }
-    catch (e: any) { alert("Gagal hapus: " + (e?.message || e)); }
-  }
-
-  async function convertOrderToSale(order: DeliveryOrder) {
-    if (!user?.email) return alert("Belum login.");
-    if (order.status === "canceled") return alert("Pesanan dibatalkan.");
-    if (order.linkedSaleId) return alert("Pesanan ini sudah dikonversi.");
-
-    const shippingFee = order.shippingFee ?? computeShippingFee(order.customer?.distanceKm);
-    const baseSubtotal = order.items.reduce((s, i) => s + i.price * i.qty, 0);
-    const subtotalWithShipping = baseSubtotal + (shippingFee || 0);
-    const discount = order.discount || 0;
-    const tax = 0; const service = 0;
-    const total = subtotalWithShipping - discount;
-
-    const saleItems = [
-      ...order.items.map(i => ({ name: i.name, price: i.price, qty: i.qty })),
-      ...(shippingFee ? [{ name: "Ongkir", price: shippingFee, qty: 1 }] : [])
-    ];
-
-    const salePayload: Omit<Sale, "id"> = {
+    const payload = {
       outlet: OUTLET,
-      shiftId: null,
-      cashierEmail: user.email,
-      customerPhone: order.customer?.phone || null,
-      customerName: order.customer?.name || null,
-      time: serverTimestamp() as any,
-      items: saleItems,
-      subtotal: subtotalWithShipping,
-      discount,
-      tax,
-      service,
-      total,
-      payMethod: order.payMethod === "cod" ? "cash" : "qris",
-      cash: undefined,
-      change: undefined,
-    };
+      shiftId: o.assignedShiftId || activeShift?.id || null,
+      cashierEmail: user?.email || "system@order",
+      customerPhone: o.customer?.phone || null,
+      customerName: o.customer?.name || null,
+      time: serverTimestamp(),
+      items, subtotal, discount, tax, service,
+      total, payMethod: o.payMethod==="cod" ? "cash" : "qris",
+      cash: o.payMethod==="cod" ? total : 0,
+      change: 0,
+      source: "order",
+      orderId: o.id,
+      deliveryFee,
+    } as any;
 
-    try {
-      const sRef = await addDoc(collection(db, "sales"), salePayload as any);
+    const saleRef = await addDoc(collection(db,"sales"), payload);
 
-      // loyalty
-      if (order.customer?.phone) {
-        const phone = order.customer.phone.trim();
-        const cRef = doc(db, "customers", phone);
-        const snap = await getDoc(cRef);
-        const pts = Math.floor(total / 15000);
-        if (snap.exists()) {
-          const curr = snap.data() as any;
-          const newPts = (curr.points || 0) + pts;
-          if (newPts >= 10) {
-            await setDoc(doc(db, "free_drinks", `FD-${sRef.id}`), {
-              phone,
-              createdAt: serverTimestamp(),
-              reason: "10 points reward",
-              saleId: sRef.id,
-            });
-            await updateDoc(cRef, { points: newPts - 10 });
-          } else {
-            await updateDoc(cRef, { points: newPts });
-          }
-        } else {
-          await setDoc(cRef, { phone, name: order.customer.name || "Member", points: pts, lastVisit: serverTimestamp() });
-        }
+    if((o.customer?.phone||"").trim().length >= 8){
+      const cref = doc(db,"customers", o.customer.phone.trim());
+      const s = await getDoc(cref);
+      if(s.exists()){
+        const c = s.data() as any;
+        await updateDoc(cref, {
+          points: (c.points||0) + pts,
+          name: o.customer.name || c.name || "",
+          lastVisit: serverTimestamp()
+        });
+      }else{
+        await setDoc(cref, {
+          phone: o.customer.phone.trim(),
+          name: o.customer.name || "Member",
+          points: pts,
+          lastVisit: serverTimestamp()
+        });
+      }
+    }
+    return saleRef.id;
+  }
+
+  async function updateOrderStatus(id:string, status: Order["status"]){
+    try{
+      const ref = doc(db,"orders", id);
+      const snap = await getDoc(ref);
+      if(!snap.exists()) throw new Error("Order tidak ditemukan.");
+      const o = { id, ...(snap.data() as any) } as Order;
+
+      if(status === "confirmed" && activeShift?.id){
+        await updateDoc(ref, { status, assignedShiftId: activeShift.id });
+        return;
       }
 
-      // potong stok berdasar resep
-      await deductStockByRecipe(order.items.map(i=>({name:i.name, qty:i.qty})));
+      if(status === "done"){
+        const saleId = await createSaleFromOrder(o);
+        try{ await deductStockForOrderItems(o.items || []); }catch(e){ console.warn("deductStock:", e); }
+        await updateDoc(ref, { status, assignedShiftId: o.assignedShiftId || activeShift?.id || null, saleId });
+        return;
+      }
 
-      // tandai order selesai
-      await updateDoc(doc(db, "orders", order.id!), {
-        status: "done",
-        paid: order.payMethod === "qris" ? true : true,
-        linkedSaleId: sRef.id,
-        shippingFee,
-      });
-
-      // cetak
-      try { printReceipt(salePayload, sRef.id); } catch(e){}
-
-      alert("Order dikonversi menjadi transaksi & dicetak.");
-    } catch (err: any) {
-      alert("Gagal convert: " + (err?.message || err));
+      await updateDoc(ref, { status });
+    }catch(e:any){
+      alert("Gagal mengubah status: " + (e?.message||e));
     }
   }
 
   /* ==========================
-     UI: LOGIN
+     UI - LOGIN
   =========================== */
   if(!user){
     return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 border">
           <div className="flex items-center gap-3 mb-4">
-            <img src={LOGO_SRC} className="h-10 w-10 rounded-xl" onError={(e)=>((e.target as HTMLImageElement).style.display='none')}/>
+            <img src={LOGO_IMG_SRC} alt="logo" className="h-10 w-10 rounded-lg object-contain" onError={(e)=>{(e.currentTarget as HTMLImageElement).style.display="none"}}/>
             <div>
-              <h1 className="text-2xl font-bold">{APP_NAME}</h1>
+              <h1 className="text-2xl font-bold">NamiPOS — POS</h1>
               <p className="text-xs text-neutral-500">@{OUTLET}</p>
             </div>
           </div>
@@ -756,34 +905,35 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
   }
 
   /* ==========================
-     UI: TOPBAR
+     UI - APP
   =========================== */
   return (
     <div className="min-h-screen bg-neutral-50">
+      {/* Topbar */}
       <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src={LOGO_SRC} className="h-8 w-8 rounded-lg" onError={(e)=>((e.target as HTMLImageElement).style.display='none')}/>
+            <img src={LOGO_IMG_SRC} alt="logo" className="h-8 w-8 rounded-md object-contain" onError={(e)=>{(e.currentTarget as HTMLImageElement).style.display="none"}}/>
             <div>
-              <div className="font-bold">{APP_NAME} — {OUTLET}</div>
+              <div className="font-bold">NamiPOS — {OUTLET}</div>
               <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
             </div>
           </div>
           <nav className="flex gap-2">
             {isOwner && <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Dashboard</button>}
             <button onClick={()=>setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Kasir</button>
-            <button onClick={()=>{ setTab("history"); setDeliveryTab("admin"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
+            <button onClick={()=>{ setTab("orders"); }} className={`px-3 py-1.5 rounded-lg border ${tab==="orders"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Orders</button>
+            <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
             {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
             {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
-            {isOwner && <button onClick={()=>{ setTab("history"); setDeliveryTab("admin"); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"&&deliveryTab==="admin"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Delivery</button>}
+            <a className="px-3 py-1.5 rounded-lg border" href="/order" target="_blank" rel="noreferrer">Link Order Publik</a>
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-4">
-
-        {/* Shift badge */}
+        {/* Shift info */}
         <div className="mb-3">
           <div className="inline-flex items-center gap-2 text-xs px-3 py-1 rounded-full border bg-white">
             {activeShift?.isOpen
@@ -812,6 +962,7 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
@@ -825,6 +976,7 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
                   </tbody>
                 </table>
               </div>
+
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
@@ -845,8 +997,8 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
           </section>
         )}
 
-        {/* POS (STAFF) */}
-        {tab==="pos" && !publicOrderMode && (
+        {/* POS */}
+        {tab==="pos" && (
           <section className="grid grid-cols-1 md:grid-cols-12 gap-4">
             {/* Products */}
             <div className="md:col-span-7">
@@ -855,11 +1007,13 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                 {filteredProducts.map(p=>(
-                  <button key={p.id} onClick={()=>addToCart(p)} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
-                    {p.imageUrl ? <img src={p.imageUrl} className="h-20 w-full object-cover rounded-xl mb-2"/> : <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2" />}
+                  <button key={p.id} onClick={()=>addToCart(p)} className="text-left rounded-2xl border bg-white p-3 hover:shadow">
+                    {p.imgUrl
+                      ? <img src={p.imgUrl} alt={p.name} className="h-20 w-full object-cover rounded-xl mb-2"/>
+                      : <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2"/>}
                     <div className="font-medium leading-tight">{p.name}</div>
                     <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
-                    <div className="font-semibold mt-1">{IDR(p.price)}</div>
+                    <div className="mt-1 font-semibold">{IDR(p.price)}</div>
                   </button>
                 ))}
               </div>
@@ -871,7 +1025,7 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
                 {/* Customer */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
                   <input className="border rounded-lg px-3 py-2" placeholder="No HP pelanggan" value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} />
-                  <input className="border rounded-lg px-3 py-2" placeholder="Nama pelanggan (baru/opsional)" value={customerName} onChange={e=>setCustomerName(e.target.value)} />
+                  <input className="border rounded-lg px-3 py-2" placeholder="Nama pelanggan (baru)" value={customerName} onChange={e=>setCustomerName(e.target.value)} />
                 </div>
                 {!!customerPhone && (
                   <div className="text-xs text-neutral-600 mb-2">
@@ -971,160 +1125,158 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
           </section>
         )}
 
-        {/* POS (PUBLIC ORDER) */}
-        {tab==="pos" && publicOrderMode && (
-          <section className="max-w-3xl mx-auto">
-            <div className="bg-white rounded-2xl border p-3 mb-3">
+        {/* ORDERS (Admin) */}
+        {tab==="orders" && (
+          <section className="bg-white rounded-2xl border p-3">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold">Orders (Delivery/Takeaway)</h2>
               <div className="flex items-center gap-2">
-                <img src={LOGO_SRC} className="h-8" />
-                <div className="font-bold">{APP_NAME} — Order Online</div>
+                <select className="border rounded-lg px-2 py-1 text-sm" value={orderFilter} onChange={e=>setOrderFilter(e.target.value as any)}>
+                  <option value="all">Semua</option>
+                  <option value="pending">Pending</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="delivering">Delivering</option>
+                  <option value="done">Done</option>
+                  <option value="cancelled">Cancelled</option>
+                </select>
+                <input className="border rounded-lg px-2 py-1 text-sm" placeholder="Cari nama/HP…" value={orderSearch} onChange={e=>setOrderSearch(e.target.value)} />
               </div>
-              <p className="text-sm text-neutral-600">Silakan pilih menu dan isi data pengantaran.</p>
             </div>
 
-            <div className="grid md:grid-cols-2 gap-3">
-              {/* Produk katalog */}
-              <div>
-                <h3 className="font-semibold mb-2">Menu</h3>
-                <div className="grid grid-cols-2 gap-2">
-                  {products.filter(p=>p.active!==false).map(p=>(
-                    <button key={p.id} onClick={()=>addToCart(p)} className="border p-2 rounded bg-white hover:bg-emerald-50 text-left">
-                      {p.imageUrl && <img src={p.imageUrl} className="h-20 w-full object-cover rounded mb-1" />}
-                      <div className="font-medium">{p.name}</div>
-                      <div className="text-sm text-neutral-600">{IDR(p.price)}</div>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Keranjang + data antar */}
-              <div className="bg-white p-3 rounded border">
-                <h3 className="font-semibold mb-2">Pesanan</h3>
-                {cart.length===0 && <div className="text-sm text-neutral-500">Belum ada item.</div>}
-                {cart.map((i,idx)=>(
-                  <div key={idx} className="flex justify-between py-1 text-sm border-b">
-                    <span>{i.name} × {i.qty}</span><span>{IDR(i.price*i.qty)}</span>
-                  </div>
-                ))}
-                <div className="mt-3 text-sm border-t pt-2 flex justify-between">
-                  <b>Total</b><b>{IDR(cart.reduce((s,i)=>s+i.price*i.qty,0))}</b>
-                </div>
-
-                <div className="mt-3 grid gap-2">
-                  <input className="border p-2 rounded" placeholder="Nama" value={ordName} onChange={e=>setOrdName(e.target.value)} />
-                  <input className="border p-2 rounded" placeholder="No HP" value={ordPhone} onChange={e=>setOrdPhone(e.target.value)} />
-                  <textarea className="border p-2 rounded" placeholder="Alamat lengkap" value={ordAddress} onChange={e=>setOrdAddress(e.target.value)} />
-                  <input className="border p-2 rounded" type="number" placeholder="Jarak (km, opsional)" value={ordDistance??""} onChange={e=>setOrdDistance(e.target.value?Number(e.target.value):undefined)} />
-                  <select className="border p-2 rounded" value={ordPay} onChange={e=>setOrdPay(e.target.value as any)}>
-                    <option value="qris">Bayar Online (QRIS)</option>
-                    <option value="cod">Bayar di Tempat (COD)</option>
-                  </select>
-                  <textarea className="border p-2 rounded" placeholder="Catatan (opsional)" value={ordNote} onChange={e=>setOrdNote(e.target.value)} />
-                  <button className="bg-emerald-600 text-white p-2 rounded" onClick={submitPublicOrder}>Kirim Pesanan</button>
-                  <div className="text-xs text-neutral-500">* Dengan menekan “Kirim Pesanan”, Anda menyetujui pesanan diproses oleh outlet {OUTLET}.</div>
-                </div>
-              </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left border-b">
+                    <th className="py-2">Waktu</th>
+                    <th>Pelanggan</th>
+                    <th>Item</th>
+                    <th>Bayar</th>
+                    <th>Status</th>
+                    <th className="text-right">Aksi</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredOrders.map(o=>{
+                    const when = o.createdAt ? new Date(o.createdAt.toDate()).toLocaleString("id-ID",{hour12:false}) : "-";
+                    const sub = o.items.reduce((s,i)=>s + (i.price||0)*(i.qty||0), 0);
+                    const grand = sub + (o.deliveryFee||0);
+                    return (
+                      <tr key={o.id} className="border-b align-top">
+                        <td className="py-2">{when}</td>
+                        <td>
+                          <div className="font-medium">{o.customer?.name||"-"}</div>
+                          <div className="text-xs">
+                            <a className="underline" href={`https://wa.me/${(o.customer?.phone||"").replace(/\D/g,"")}`} target="_blank" rel="noreferrer">
+                              {o.customer?.phone||"-"}
+                            </a>
+                          </div>
+                          <div className="text-xs text-neutral-600 max-w-xs truncate" title={o.customer?.address||""}>
+                            {o.customer?.address||"-"}
+                          </div>
+                        </td>
+                        <td className="max-w-md">
+                          <div className="space-y-1">
+                            {o.items.map((it,idx)=>(
+                              <div key={idx} className="flex justify-between gap-3">
+                                <span className="truncate">{it.name} x{it.qty}</span>
+                                <span>{IDR((it.price||0)*(it.qty||0))}</span>
+                              </div>
+                            ))}
+                            <div className="border-t pt-1 flex justify-between">
+                              <span>Subtotal</span><span>{IDR(sub)}</span>
+                            </div>
+                            {o.deliveryFee ? (
+                              <>
+                                <div className="flex justify-between"><span>Ongkir</span><span>{IDR(o.deliveryFee||0)}</span></div>
+                                <div className="flex justify-between font-semibold"><span>Grand Total</span><span>{IDR(grand)}</span></div>
+                              </>
+                            ):null}
+                          </div>
+                        </td>
+                        <td className="uppercase">{o.payMethod}</td>
+                        <td>
+                          <span className="px-2 py-1 rounded-full text-xs border">
+                            {o.status}
+                          </span>
+                          {o.assignedShiftId && (
+                            <div className="text-[11px] text-neutral-500 mt-1">Shift: {o.assignedShiftId}</div>
+                          )}
+                        </td>
+                        <td className="text-right">
+                          <div className="flex flex-wrap gap-2 justify-end">
+                            {o.status==="pending" && (
+                              <button className="px-2 py-1 border rounded" onClick={()=>updateOrderStatus(o.id, "confirmed")}>
+                                Confirm
+                              </button>
+                            )}
+                            {o.status==="confirmed" && (
+                              <button className="px-2 py-1 border rounded" onClick={()=>updateOrderStatus(o.id, "delivering")}>
+                                Start Delivery
+                              </button>
+                            )}
+                            {o.status==="delivering" && (
+                              <button className="px-2 py-1 border rounded" onClick={()=>updateOrderStatus(o.id, "done")}>
+                                Mark Done
+                              </button>
+                            )}
+                            {o.status!=="done" && o.status!=="cancelled" && (
+                              <button className="px-2 py-1 border rounded bg-rose-50" onClick={()=>updateOrderStatus(o.id, "cancelled")}>
+                                Cancel
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {filteredOrders.length===0 && (
+                <div className="text-sm text-neutral-500">Belum ada order.</div>
+              )}
             </div>
           </section>
         )}
 
-        {/* HISTORY + DELIVERY ADMIN */}
+        {/* HISTORY */}
         {tab==="history" && (
-          <>
-            {/* Riwayat Sales */}
-            <section className="bg-white rounded-2xl border p-3">
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-lg font-semibold">Riwayat Transaksi</h2>
-                <div className="flex gap-2">
-                  <button className="px-3 py-2 rounded-lg border" onClick={()=>loadHistory(false)} disabled={historyLoading}>Muat Ulang</button>
-                  <button className="px-3 py-2 rounded-lg border" onClick={()=>loadHistory(true)} disabled={historyLoading || !histCursor}>Muat Lagi</button>
-                </div>
+          <section className="bg-white rounded-2xl border p-3">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold">Riwayat Transaksi</h2>
+              <div className="flex gap-2">
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>loadHistory(false)} disabled={historyLoading}>Muat Ulang</button>
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>loadHistory(true)} disabled={historyLoading || !histCursor}>Muat Lagi</button>
               </div>
-              <div className="overflow-auto">
-                <table className="w-full text-sm">
-                  <thead><tr className="text-left border-b">
-                    <th className="py-2">Waktu</th><th>Kasir</th><th>Pelanggan</th><th>Item</th><th className="text-right">Total</th><th className="text-right">Aksi</th>
-                  </tr></thead>
-                  <tbody>
-                    {historyRows.map(s=>(
-                      <tr key={s.id} className="border-b hover:bg-emerald-50/40 align-top">
-                        <td className="py-2">{s.time? new Date(s.time.toDate()).toLocaleString("id-ID",{hour12:false}) : "-"}</td>
-                        <td>{s.cashierEmail}</td>
-                        <td>{s.customerPhone || "-"}</td>
-                        <td className="truncate">{s.items.map(i=>`${i.name}x${i.qty}`).join(", ")}</td>
-                        <td className="text-right font-medium">{IDR(s.total)}</td>
-                        <td className="text-right">
-                          {isOwner && <button className="px-2 py-1 rounded border bg-rose-50" onClick={()=>deleteSale(s.id!)}>Hapus</button>}
-                        </td>
-                      </tr>
-                    ))}
-                    {historyRows.length===0 && <tr><td colSpan={6} className="py-3 text-neutral-500">Belum ada transaksi.</td></tr>}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-
-            {/* Delivery Admin */}
-            {isOwner && deliveryTab==="admin" && !publicOrderMode && (
-              <section className="bg-white rounded-2xl border p-3 mt-4">
-                <div className="flex items-center justify-between mb-2">
-                  <h2 className="text-lg font-semibold">Delivery Orders</h2>
-                  <div className="text-xs text-neutral-600">Klik tombol status untuk mengubah</div>
-                </div>
-                <div className="overflow-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left border-b">
-                        <th>Waktu</th><th>Pelanggan</th><th>Alamat</th>
-                        <th>Item</th><th className="text-right">Total</th><th>Status</th><th>Bayar</th><th>Ongkir</th><th>Aksi</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {orders.map(o=>(
-                        <tr key={o.id} className="border-b align-top">
-                          <td className="py-2">{o.createdAt? new Date(o.createdAt.toDate()).toLocaleString("id-ID",{hour12:false}) : "-"}</td>
-                          <td>{o.customer?.name} <div className="text-xs text-neutral-500">{o.customer?.phone}</div></td>
-                          <td className="max-w-[280px]">
-                            <div className="truncate">{o.customer?.address}</div>
-                            {o.customer?.distanceKm ? <div className="text-[11px] text-neutral-500">{o.customer.distanceKm} km</div> : null}
-                          </td>
-                          <td className="max-w-[260px]">
-                            <div className="truncate">{o.items.map(i=>`${i.name}×${i.qty}`).join(", ")}</div>
-                            {o.note && <div className="text-[11px] text-neutral-500">Note: {o.note}</div>}
-                          </td>
-                          <td className="text-right">{IDR(o.total)}</td>
-                          <td>
-                            <div className="inline-flex flex-wrap gap-1">
-                              {(["new","accepted","preparing","on_delivery","done","canceled"] as DeliveryOrder["status"][]).map(st=>(
-                                <button
-                                  key={st}
-                                  className={`px-2 py-1 rounded border text-[11px] ${o.status===st ? "bg-emerald-50 border-emerald-200" : ""}`}
-                                  onClick={()=>setOrderStatus(o.id!, st)}
-                                >
-                                  {st}
-                                </button>
-                              ))}
-                            </div>
-                          </td>
-                          <td className="text-xs">{o.payMethod.toUpperCase()} {o.paid ? "• paid" : ""}</td>
-                          <td className="text-right text-xs">{o.shippingFee ? IDR(o.shippingFee) : "-"}</td>
-                          <td className="text-right">
-                            {!o.linkedSaleId && o.status!=="canceled" && (
-                              <button className="px-2 py-1 rounded border bg-emerald-600 text-white mr-2" onClick={()=>convertOrderToSale(o)}>
-                                Convert to Sale & Print
-                              </button>
-                            )}
-                            <button className="px-2 py-1 rounded border bg-rose-50" onClick={()=>deleteOrder(o.id!)}>Hapus</button>
-                          </td>
-                        </tr>
-                      ))}
-                      {orders.length===0 && <tr><td colSpan={9} className="py-3 text-neutral-500">Belum ada pesanan delivery.</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            )}
-          </>
+            </div>
+            <div className="overflow-auto">
+              <table className="w-full text-sm">
+                <thead><tr className="text-left border-b">
+                  <th className="py-2">Waktu</th><th>Kasir</th><th>Pelanggan</th><th>Item</th><th className="text-right">Total</th><th className="text-right">Aksi</th>
+                </tr></thead>
+                <tbody>
+                  {historyRows.map(s=>(
+                    <tr key={s.id} className="border-b hover:bg-emerald-50/40">
+                      <td className="py-2">{s.time? new Date(s.time.toDate()).toLocaleString("id-ID",{hour12:false}) : "-"}</td>
+                      <td>{s.cashierEmail}</td>
+                      <td>{s.customerPhone || "-"}</td>
+                      <td className="truncate">{s.items.map(i=>`${i.name}x${i.qty}`).join(", ")}</td>
+                      <td className="text-right font-medium">{IDR(s.total)}</td>
+                      <td className="text-right">
+                        {isOwner && s.id && (
+                          <button className="px-2 py-1 border rounded bg-rose-50" onClick={async()=>{
+                            if(!confirm("Hapus transaksi ini?")) return;
+                            await deleteDoc(doc(db,"sales", s.id!));
+                            loadHistory(false);
+                          }}>Hapus</button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {historyRows.length===0 && <div className="text-sm text-neutral-500">Belum ada transaksi.</div>}
+            </div>
+          </section>
         )}
 
         {/* PRODUCTS */}
@@ -1136,34 +1288,37 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th>Gambar URL</th><th className="text-right">Aksi</th></tr></thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th>Gambar</th><th className="text-right">Aksi</th></tr></thead>
                 <tbody>
                   {products.map(p=>(
                     <tr key={p.id} className="border-b">
-                      <td className="py-2">
-                        <input className="border rounded px-2 py-1" defaultValue={p.name} onBlur={(e)=>upsertProduct({ id:p.id, name:e.currentTarget.value })}/>
-                      </td>
+                      <td className="py-2">{p.name}</td>
+                      <td>{p.category||"-"}</td>
+                      <td className="text-right">{IDR(p.price)}</td>
                       <td>
-                        <input className="border rounded px-2 py-1" defaultValue={p.category||""} onBlur={(e)=>upsertProduct({ id:p.id, category:e.currentTarget.value })}/>
+                        {p.imgUrl
+                          ? <img src={p.imgUrl} alt="" className="h-10 w-10 object-cover rounded" />
+                          : <span className="text-xs text-neutral-500">-</span>}
                       </td>
                       <td className="text-right">
-                        <input type="number" className="border rounded px-2 py-1 w-28 text-right" defaultValue={p.price} onBlur={(e)=>upsertProduct({ id:p.id, price:Number(e.currentTarget.value)||0 })}/>
-                      </td>
-                      <td>
-                        <input className="border rounded px-2 py-1 w-64" placeholder="https://..." defaultValue={p.imageUrl||""} onBlur={(e)=>upsertProduct({ id:p.id, imageUrl:e.currentTarget.value })}/>
-                      </td>
-                      <td className="text-right">
-                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>upsertProduct({ id:p.id, active: !(p.active===false) ? false : true })}>
-                          {(p.active!==false) ? "Nonaktifkan" : "Aktifkan"}
-                        </button>
-                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>removeProduct(p.id)}>Hapus</button>
-                        <button className="px-2 py-1 border rounded" onClick={()=>promptRecipe(p.id)}>Resep</button>
+                        <div className="flex flex-wrap gap-2 justify-end">
+                          <button className="px-2 py-1 border rounded" onClick={async()=>{
+                            const name = prompt("Nama produk:", p.name) ?? p.name;
+                            const priceStr = prompt("Harga (angka):", String(p.price)) ?? String(p.price);
+                            const category = prompt("Kategori:", p.category||"Signature") ?? (p.category||"Signature");
+                            const imgUrl = prompt("URL Gambar (opsional):", p.imgUrl||"") ?? (p.imgUrl||"");
+                            const price = Number(priceStr)||0;
+                            await upsertProduct({ id:p.id, name, price, category, imgUrl });
+                          }}>Edit</button>
+                          <button className="px-2 py-1 border rounded" onClick={()=>deactivateProduct(p.id)}>Nonaktifkan</button>
+                          <button className="px-2 py-1 border rounded bg-rose-50" onClick={()=>deleteProduct(p.id)}>Hapus</button>
+                        </div>
                       </td>
                     </tr>
                   ))}
-                  {products.length===0 && <tr><td colSpan={5} className="py-3 text-neutral-500">Belum ada produk.</td></tr>}
                 </tbody>
               </table>
+              {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
             </div>
           </section>
         )}
@@ -1177,41 +1332,33 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Min</th><th className="text-right">Aksi</th></tr></thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Aksi</th></tr></thead>
                 <tbody>
-                  {ingredients.map(i=>(
-                    <tr key={i.id} className="border-b">
-                      <td className="py-2">
-                        <input className="border rounded px-2 py-1" defaultValue={i.name} onBlur={(e)=>upsertIngredient({ id:i.id, name:e.currentTarget.value })}/>
-                      </td>
-                      <td>
-                        <input className="border rounded px-2 py-1 w-24" defaultValue={i.unit} onBlur={(e)=>upsertIngredient({ id:i.id, unit:e.currentTarget.value })}/>
-                      </td>
-                      <td className="text-right">
-                        <input type="number" className="border rounded px-2 py-1 w-24 text-right" defaultValue={i.stock} onBlur={(e)=>upsertIngredient({ id:i.id, stock:Number(e.currentTarget.value)||0 })}/>
-                      </td>
-                      <td className="text-right">
-                        <input type="number" className="border rounded px-2 py-1 w-24 text-right" defaultValue={i.min||0} onBlur={(e)=>upsertIngredient({ id:i.id, min:Number(e.currentTarget.value)||0 })}/>
-                      </td>
-                      <td className="text-right">
-                        <button className="px-2 py-1 border rounded" onClick={()=>removeIngredient(i.id)}>Hapus</button>
-                      </td>
-                    </tr>
-                  ))}
-                  {ingredients.length===0 && <tr><td colSpan={5} className="py-3 text-neutral-500">Belum ada data inventori.</td></tr>}
+                  {ingredients.map(i=>{
+                    const low = (i.min||0)>0 && i.stock<= (i.min||0);
+                    return (
+                      <tr key={i.id} className={`border-b ${low?"bg-amber-50":""}`}>
+                        <td className="py-2">{i.name}</td>
+                        <td>{i.unit}</td>
+                        <td className="text-right">{i.stock}</td>
+                        <td className="text-right">
+                          <div className="flex flex-wrap gap-2 justify-end">
+                            <button className="px-2 py-1 border rounded" onClick={async()=>{
+                              const name = prompt("Nama bahan:", i.name) ?? i.name;
+                              const unit = prompt("Satuan:", i.unit) ?? i.unit;
+                              const stock = Number(prompt("Stok:", String(i.stock)) ?? String(i.stock))||0;
+                              const min = Number(prompt("Stok minimum (peringatan):", String(i.min||0)) ?? String(i.min||0))||0;
+                              await upsertIngredient({ id:i.id, name, unit, stock, min });
+                            }}>Edit</button>
+                            <button className="px-2 py-1 border rounded bg-rose-50" onClick={()=>deleteIngredient(i.id)}>Hapus</button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
-            </div>
-
-            {/* Low stock warning */}
-            <div className="mt-3">
-              <div className="text-sm font-semibold mb-1">Peringatan Stok Menipis</div>
-              <ul className="text-sm list-disc pl-5">
-                {ingredients.filter(i=> i.min!>=0 && i.stock<= (i.min||0)).map(i=>(
-                  <li key={i.id}>{i.name} — Stok: {i.stock} {i.unit} (min {i.min})</li>
-                ))}
-                {ingredients.filter(i=> i.min!>=0 && i.stock<= (i.min||0)).length===0 && <li className="text-neutral-500">Aman.</li>}
-              </ul>
+              {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
             </div>
           </section>
         )}
@@ -1228,23 +1375,6 @@ img.logo{display:block;margin:0 auto 6px;height:42px}
       )}
     </div>
   );
-
-  /* ======= helper: edit recipe via prompt ======= */
-  function promptRecipe(productId: string){
-    const current = recipes.find(r=>r.productId===productId);
-    const text = window.prompt(
-      "Masukkan resep (format: ingredientId:qty per baris). Contoh:\nING_123:50\nING_456:10",
-      current ? current.items.map(x=>`${x.ingredientId}:${x.qty}`).join("\n") : ""
-    );
-    if(text==null) return;
-    const items: RecipeItem[] = [];
-    text.split("\n").map(v=>v.trim()).filter(Boolean).forEach(line=>{
-      const [id, qtyStr] = line.split(":");
-      const qty = Number(qtyStr||"0");
-      if(id && qty>0) items.push({ ingredientId:id.trim(), qty });
-    });
-    setRecipeForProduct(productId, items);
-  }
 }
 
 /* ===== Small UI helpers ===== */
