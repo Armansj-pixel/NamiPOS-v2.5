@@ -414,15 +414,17 @@ img.qris{display:block;margin:6px auto;height:120px}
     if (payMethod === "cash" && cash < total) return alert("Uang tunai kurang.");
 
     // Cek stok berdasarkan resep
-    const stockCheck = await checkShortageForCart(cart.map(i => ({ productId: i.productId, qty: i.qty })));
-    if ("ok" in stockCheck && !stockCheck.ok) {
-      const lines = stockCheck.shortages
-        .map(s => `• ${s.name}: perlu ${s.need} ${s.unit}, stok ${s.have}`)
-        .join("\n");
-      alert("Stok tidak mencukupi:\n\n" + lines);
-      return;
-    }
+    const stockCheck = await checkShortageForCart(
+  cart.map(i => ({ productId: i.productId, qty: i.qty }))
+);
 
+if ("ok" in stockCheck && stockCheck.ok === false && Array.isArray(stockCheck.shortages)) {
+  const lines = stockCheck.shortages
+    .map(s => `• ${s.name}: perlu ${s.need} ${s.unit}, stok ${s.have}`)
+    .join("\n");
+  alert("Stok tidak mencukupi:\n\n" + lines);
+  return;
+}
     const payload: Omit<Sale, "id"> = {
       outlet: OUTLET, shiftId: activeShift.id, cashierEmail: user.email,
       customerPhone: customerPhone?.trim() || null, customerName: customerName?.trim() || null,
