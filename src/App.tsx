@@ -8,6 +8,27 @@ import {
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
 
+/* ===== Delivery Types & Utils (ADD) ===== */
+type DeliveryOrder = {
+  id?: string;
+  outlet: string;
+  items: { productId: string; name: string; price: number; qty: number }[];
+  note?: string;
+  customer: { name: string; phone: string; address: string; lat?: number; lng?: number };
+  payment: "qris" | "cod";
+  distanceKm: number;
+  shippingCost: number;
+  subtotal: number;
+  total: number;
+  status: "new" | "accepted" | "rejected" | "delivered" | "cancelled";
+  createdAt: any;
+};
+
+const calcShipping = (km: number) => {
+  // 1 km pertama gratis, sisanya dibulatkan ke atas per km x 2000
+  const afterFree = Math.max(0, km - 1);
+  return Math.ceil(afterFree) * 2000;
+};
 /* ==========================
    KONFIG & KONST
 ========================== */
@@ -75,6 +96,9 @@ const endOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(23, 59,
 const daysAgo = (n: number) => { const x = new Date(); x.setDate(x.getDate() - n); return x; };
 const earnPoints = (total: number) => Math.floor((total || 0) / 15000); // 15.000 = 1 poin
 
+const getQueryParam = (k: string) => {
+  try { return new URLSearchParams(window.location.search).get(k) || ""; } catch { return ""; }
+};
 /* ==========================
    APP
 ========================== */
@@ -642,8 +666,18 @@ if ("ok" in stockCheck && stockCheck.ok === false && Array.isArray(stockCheck.sh
   /* ==========================
      UI — LOGIN
   =========================== */
-  if (!user) {
-    return (
+  // --- Public Order Router (ADD) ---
+const isPublicOrder = typeof window !== "undefined" && window.location.pathname.startsWith("/order");
+const outletFromUrl = isPublicOrder ? (getQueryParam("outlet") || OUTLET) : OUTLET;
+
+if (isPublicOrder) {
+  return <PublicOrder outlet={outletFromUrl} />;
+}
+
+// --- Auth guard (tetap) ---
+if (!user) {
+  return ( /* layar login seperti sudah ada */ );
+}
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 border">
           <div className="flex items-center gap-3 mb-4">
@@ -1072,6 +1106,218 @@ function KPI({ title, value }: { title: string; value: string }) {
     <div className="bg-white border rounded-2xl p-4 shadow-sm">
       <div className="text-[12px] text-neutral-500">{title}</div>
       <div className="text-xl font-bold mt-1">{value}</div>
+    </div>
+  );
+}
+/* ==========================
+   PUBLIC ORDER PAGE (ADD)
+========================== */
+function PublicOrder({ outlet }: { outlet: string }) {
+  const [products, setProducts] = React.useState<Product[]>([]);
+  const [q, setQ] = React.useState("");
+  const [cart, setCart] = React.useState<{ productId: string; name: string; price: number; qty: number }[]>([]);
+  const [custName, setCustName] = React.useState("");
+  const [custPhone, setCustPhone] = React.useState("");
+  const [custAddr, setCustAddr] = React.useState("");
+  const [note, setNote] = React.useState("");
+  const [distanceKm, setDistanceKm] = React.useState<number>(1);
+  const [pay, setPay] = React.useState<"qris" | "cod">("qris");
+  const [sending, setSending] = React.useState(false);
+
+  // load produk aktif outlet
+  React.useEffect(() => {
+    const qProd = query(
+      collection(db, "products"),
+      where("outlet", "==", outlet),
+      where("active", "==", true)
+    );
+    const unsub = onSnapshot(qProd, (snap) => {
+      const rows: Product[] = snap.docs.map((d) => {
+        const x = d.data() as any;
+        return { id: d.id, name: x.name, price: x.price, category: x.category, active: x.active, outlet: x.outlet };
+      });
+      setProducts(rows);
+    });
+    return () => unsub();
+  }, [outlet]);
+
+  const filtered = React.useMemo(
+    () => products.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())),
+    [products, q]
+  );
+
+  const addToCart = (p: Product) => {
+    setCart((prev) => {
+      const found = prev.find((i) => i.productId === p.id);
+      if (found) return prev.map((i) => (i.productId === p.id ? { ...i, qty: i.qty + 1 } : i));
+      return [...prev, { productId: p.id, name: p.name, price: p.price, qty: 1 }];
+    });
+  };
+  const inc = (pid: string) => setCart((prev) => prev.map((i) => (i.productId === pid ? { ...i, qty: i.qty + 1 } : i)));
+  const dec = (pid: string) =>
+    setCart((prev) => prev.map((i) => (i.productId === pid ? { ...i, qty: Math.max(1, i.qty - 1) } : i)));
+  const rm = (pid: string) => setCart((prev) => prev.filter((i) => i.productId !== pid));
+
+  const subtotal = React.useMemo(() => cart.reduce((s, i) => s + i.price * i.qty, 0), [cart]);
+  const shipping = React.useMemo(() => calcShipping(Number.isFinite(distanceKm) ? distanceKm : 1), [distanceKm]);
+  const total = subtotal + shipping;
+
+  async function submitOrder() {
+    if (!custName.trim() || !custPhone.trim() || !custAddr.trim()) {
+      alert("Nama, nomor HP, dan alamat wajib diisi."); return;
+    }
+    if (cart.length === 0) {
+      alert("Keranjang masih kosong."); return;
+    }
+    setSending(true);
+    try {
+      const payload: DeliveryOrder = {
+        outlet,
+        items: cart.map((i) => ({ productId: i.productId, name: i.name, price: i.price, qty: i.qty })),
+        note: note || undefined,
+        customer: { name: custName.trim(), phone: custPhone.trim(), address: custAddr.trim() },
+        payment: pay,
+        distanceKm: Number(distanceKm) || 1,
+        shippingCost: shipping,
+        subtotal,
+        total,
+        status: "new",
+        createdAt: serverTimestamp(),
+      };
+      const ref = await addDoc(collection(db, "orders"), payload as any);
+      alert("Pesanan terkirim!\nKode: " + ref.id + (pay === "qris" ? "\nSilakan lanjut scan QR/konfirmasi." : ""));
+      // reset ringan
+      setCart([]); setNote(""); setDistanceKm(1);
+    } catch (e: any) {
+      alert("Gagal mengirim pesanan: " + (e?.message || e));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-neutral-50">
+      <header className="bg-white border-b sticky top-0">
+        <div className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img src="/brand-logo.png" alt="logo" className="h-8 w-8 rounded" onError={(e:any)=>{e.currentTarget.style.display='none'}}/>
+            <div>
+              <div className="font-bold">NamiPOS — {outlet}</div>
+              <div className="text-[11px] text-neutral-500">Public Order</div>
+            </div>
+          </div>
+          <a href="/" className="text-sm text-emerald-700">Masuk sebagai staf</a>
+        </div>
+      </header>
+
+      <main className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-4 grid grid-cols-1 md:grid-cols-12 gap-4">
+        {/* Produk */}
+        <section className="md:col-span-7">
+          <div className="bg-white rounded-2xl border p-3 mb-2">
+            <input
+              className="border rounded-lg px-3 py-2 w-full"
+              placeholder="Cari menu…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-3">
+            {filtered.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => addToCart(p)}
+                className="text-left rounded-2xl border bg-white p-3 hover:shadow"
+              >
+                <div className="h-20 w-full rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2" />
+                <div className="font-medium leading-tight">{p.name}</div>
+                <div className="text-xs text-neutral-500">{p.category || "Menu"}</div>
+                <div className="mt-1 font-semibold">{IDR(p.price)}</div>
+              </button>
+            ))}
+            {filtered.length === 0 && (
+              <div className="text-sm text-neutral-500 col-span-full">Menu belum tersedia / belum aktif.</div>
+            )}
+          </div>
+        </section>
+
+        {/* Keranjang + Data */}
+        <section className="md:col-span-5">
+          <div className="bg-white rounded-2xl border p-3">
+            <div className="grid grid-cols-1 gap-2 mb-2">
+              <input className="border rounded-lg px-3 py-2" placeholder="Nama" value={custName} onChange={(e)=>setCustName(e.target.value)} />
+              <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={(e)=>setCustPhone(e.target.value)} />
+              <textarea className="border rounded-lg px-3 py-2" placeholder="Alamat lengkap" rows={2} value={custAddr} onChange={(e)=>setCustAddr(e.target.value)} />
+              <textarea className="border rounded-lg px-3 py-2" placeholder="Catatan pesanan (opsional)" rows={2} value={note} onChange={(e)=>setNote(e.target.value)} />
+            </div>
+
+            {cart.length === 0 ? (
+              <div className="text-sm text-neutral-500">Keranjang kosong.</div>
+            ) : (
+              <div className="space-y-2">
+                {cart.map((ci) => (
+                  <div key={ci.productId} className="grid grid-cols-12 items-center gap-2 rounded-xl border p-2">
+                    <div className="col-span-6">
+                      <div className="font-medium leading-tight">{ci.name}</div>
+                    </div>
+                    <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
+                    <div className="col-span-3 flex items-center justify-end gap-2">
+                      <button className="px-2 py-1 border rounded" onClick={() => dec(ci.productId)}>-</button>
+                      <div className="w-8 text-center font-medium">{ci.qty}</div>
+                      <button className="px-2 py-1 border rounded" onClick={() => inc(ci.productId)}>+</button>
+                    </div>
+                    <div className="col-span-1 text-right">
+                      <button className="px-2 py-1 rounded border" onClick={() => rm(ci.productId)}>x</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* ongkir & total */}
+            <div className="my-3 border-t pt-3 space-y-2">
+              <label className="flex items-center gap-2 text-sm">
+                <span className="w-32">Jarak (km)</span>
+                <input
+                  type="number"
+                  className="border rounded-lg px-2 py-1 w-28"
+                  min={1}
+                  step="0.1"
+                  value={distanceKm}
+                  onChange={(e) => setDistanceKm(Number(e.target.value) || 1)}
+                />
+              </label>
+              <div className="flex items-center justify-between text-sm">
+                <span>Subtotal</span><span className="font-medium">{IDR(subtotal)}</span>
+              </div>
+              <div className="flex items-center justify-between text-sm">
+                <span>Ongkir</span><span className="font-medium">{IDR(shipping)}</span>
+              </div>
+              <div className="flex items-center justify-between text-lg font-semibold">
+                <span>Total</span><span>{IDR(total)}</span>
+              </div>
+            </div>
+
+            {/* metode bayar */}
+            <div className="grid grid-cols-1 gap-2 mb-2">
+              <select className="border rounded-lg px-3 py-2" value={pay} onChange={(e)=>setPay(e.target.value as any)}>
+                <option value="qris">QRIS (online)</option>
+                <option value="cod">COD (bayar di tempat)</option>
+              </select>
+              {pay === "qris" && (
+                <div className="text-xs text-neutral-600">Setelah pesan dibuat, kasir akan mengirim QR untuk pembayaran.</div>
+              )}
+            </div>
+
+            <button
+              className="w-full px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
+              onClick={submitOrder}
+              disabled={sending || cart.length===0}
+            >
+              {sending ? "Mengirim..." : "Kirim Pesanan"}
+            </button>
+          </div>
+        </section>
+      </main>
     </div>
   );
 }
