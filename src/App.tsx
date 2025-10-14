@@ -1330,5 +1330,6 @@ img.qr{display:block;margin:6px auto;height:120px}
         )}
       </main>
     </div>
-  )};
+  );
+}
 /* ========= END PART 4/4 ========= */
