@@ -1,8 +1,7 @@
-/* App.tsx — NamiPOS v2.5.4 (stable fixed full)
+/* App.tsx — NamiPOS v2.5.4 (fixed full)
    Fitur: POS, Shift, Produk, Inventori, Resep (auto stock), Loyalty (15k=1 poin),
    Riwayat (hapus by owner), Dashboard, Public Order (/order?outlet=...)
 */
-
 import React, { useEffect, useMemo, useState } from "react";
 import {
   addDoc, collection, deleteDoc, doc, getDoc, getDocs, onSnapshot,
@@ -11,7 +10,6 @@ import {
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
-import { query as queryFS } from "firebase/firestore";
 
 /* ==========================
    KONFIG
@@ -21,9 +19,9 @@ const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-const BRAND_LOGO = "/brand-logo.png";
-const QRIS_IMG_SRC = "/qris.png";
-const POINT_PER_RP = 15000;
+const BRAND_LOGO = "/brand-logo.png"; // public
+const QRIS_IMG_SRC = "/qris.png";     // public
+const POINT_PER_RP = 15000;           // 15k => 1 poin
 const FREE_DRINK_POINTS = 10;
 const SHIPPING_PER_KM = 2000;
 
@@ -60,10 +58,7 @@ const IDR = (n: number) =>
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 const endOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
 const daysAgo = (n: number) => { const x = new Date(); x.setDate(x.getDate() - n); return x; };
-const calcShipping = (km: number) => {
-  const afterFree = Math.max(0, (Number.isFinite(km) ? km : 1) - 1);
-  return Math.ceil(afterFree) * SHIPPING_PER_KM;
-};
+const calcShipping = (km: number) => { const afterFree = Math.max(0, (Number.isFinite(km) ? km : 1) - 1); return Math.ceil(afterFree) * SHIPPING_PER_KM; };
 
 /* ==========================
    RECIPE & STOCK HELPERS
@@ -75,7 +70,8 @@ async function fetchRecipe(productId: string): Promise<RecipeDoc | null> {
   return { id: r.id, items: Array.isArray(x.items) ? x.items : [] };
 }
 
-async function checkShortageForCart(cartPairs: { productId: string; qty: number }[]) {
+async function checkShortageForCart(cartPairs: { productId: string; qty: number }[])
+: Promise<{ok:true} | {ok:false; shortages:{name:string;need:number;have:number;unit:string}[]}> {
   const ingNeeds = new Map<string, number>();
   for (const pair of cartPairs) {
     const recipe = await fetchRecipe(pair.productId);
@@ -84,22 +80,19 @@ async function checkShortageForCart(cartPairs: { productId: string; qty: number 
       ingNeeds.set(it.ingredientId, (ingNeeds.get(it.ingredientId) || 0) + (it.qty * pair.qty));
     }
   }
-  if (ingNeeds.size === 0) return { ok: true as const };
+  if (ingNeeds.size === 0) return { ok: true };
   const shortages: { name: string; need: number; have: number; unit: string }[] = [];
   for (const ingId of Array.from(ingNeeds.keys())) {
     const snap = await getDoc(doc(db, "ingredients", ingId));
-    if (!snap.exists()) {
-      shortages.push({ name: `#${ingId}`, need: ingNeeds.get(ingId) || 0, have: 0, unit: "-" });
-      continue;
-    }
+    if (!snap.exists()) { shortages.push({ name: `#${ingId}`, need: ingNeeds.get(ingId) || 0, have: 0, unit: "-" }); continue; }
     const d = snap.data() as any;
     const need = ingNeeds.get(ingId) || 0;
     const have = Number(d.stock || 0);
     const unit = d.unit || "-";
     if (have < need) shortages.push({ name: d.name || `#${ingId}`, need, have, unit });
   }
-  if (shortages.length) return { ok: false as const, shortages };
-  return { ok: true as const };
+  if (shortages.length) return { ok: false, shortages };
+  return { ok: true };
 }
 
 async function deductStockForCart(cartPairs: { productId: string; qty: number }[]) {
@@ -116,10 +109,15 @@ async function deductStockForCart(cartPairs: { productId: string; qty: number }[
     }
   }
 }
+
 /* ==========================
-   APP (state, auth, data, shift, loyalty, finalize, print, history, dashboard)
+   APP
 ========================== */
 export default function App() {
+  // Public order mode: render tanpa login bila path /order
+  const isPublicOrder = typeof window !== "undefined" && window.location.pathname === "/order";
+  if (isPublicOrder) return <PublicOrder />;
+
   /* ---- auth ---- */
   const [user, setUser] = useState<null | { email: string }>(null);
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
@@ -206,7 +204,7 @@ export default function App() {
         return { id:d.id, name:x.name, price:x.price, imageUrl:x.imageUrl, category:x.category, active:x.active, outlet:x.outlet };
       });
       setProducts(rows);
-    });
+    }, err => alert("Memuat produk gagal.\n" + (err.message || err)));
 
     // ingredients
     const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
@@ -216,7 +214,7 @@ export default function App() {
         return { id:d.id, name:x.name, unit:x.unit, stock:x.stock??0, min:x.min??0, outlet:x.outlet };
       });
       setIngredients(rows);
-    });
+    }, err => alert("Memuat inventori gagal.\n" + (err.message || err)));
 
     // recipes (preload agar finalize cepat)
     const unsubRecipes = onSnapshot(collection(db,"recipes"), snap=>{
@@ -322,13 +320,11 @@ export default function App() {
     if (cart.length === 0) return alert("Keranjang kosong.");
     if (payMethod==="cash" && cash < total) return alert("Tunai kurang.");
 
-    // cek stok dulu
+    // cek stok
     const shortage = await checkShortageForCart(cart.map(c => ({ productId: c.productId, qty: c.qty })));
     if (!shortage.ok) {
-      return alert(
-        "Stok tidak mencukupi:\n" +
-        shortage.shortages.map(s => `${s.name}: butuh ${s.need}${s.unit}, sisa ${s.have}`).join("\n")
-      );
+      const s = shortage as {ok:false; shortages:{name:string;need:number;have:number;unit:string}[]};
+      return alert("Stok tidak mencukupi:\n" + s.shortages.map(x => `${x.name}: butuh ${x.need}${x.unit}, sisa ${x.have}`).join("\n"));
     }
 
     // kurangi stok
@@ -354,7 +350,6 @@ export default function App() {
 
     // cetak dulu (pakai state saat ini), lalu simpan + reset
     printReceipt();
-
     await addDoc(collection(db,"sales"), saleData);
 
     if (customerPhone) {
@@ -514,18 +509,7 @@ export default function App() {
   }
 
   /* ==========================
-     (UI render + modals & PublicOrder ada di Part 3 & 4)
-  =========================== */
-
-  // sementara export state & funcs ke scope global optional (debug)
-  // (tidak wajib)
-  // @ts-ignore
-  window.__NamiPOS = { setTab, loadHistory, loadDashboard };
-
-  // Part 3 akan mulai dari blok UI render (login/topbar/pos/history/dll)
-} ya
-/* ==========================
-     UI RENDER (login, header, POS, history, products, inventory)
+     RENDER
   =========================== */
 
   // LOGIN SCREEN
@@ -567,33 +551,28 @@ export default function App() {
           </div>
           <nav className="flex gap-2">
             {isOwner && (
-              <button
-                onClick={()=>{ setTab("dashboard"); loadDashboard(); }}
-                className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+              <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }}
+                      className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
                 Dashboard
               </button>
             )}
-            <button
-              onClick={()=>setTab("pos")}
-              className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+            <button onClick={()=>setTab("pos")}
+                    className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
               Kasir
             </button>
-            <button
-              onClick={()=>{ setTab("history"); loadHistory(false); }}
-              className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+            <button onClick={()=>{ setTab("history"); loadHistory(false); }}
+                    className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
               Riwayat
             </button>
             {isOwner && (
-              <button
-                onClick={()=>setTab("products")}
-                className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+              <button onClick={()=>setTab("products")}
+                      className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
                 Produk
               </button>
             )}
             {isOwner && (
-              <button
-                onClick={()=>setTab("inventory")}
-                className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+              <button onClick={()=>setTab("inventory")}
+                      className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
                 Inventori
               </button>
             )}
@@ -613,21 +592,12 @@ export default function App() {
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {!activeShift?.isOpen ? (
               <>
-                <input
-                  type="number"
-                  className="border rounded-lg px-3 py-2 w-40"
-                  placeholder="Kas awal (Rp)"
-                  value={openCash}
-                  onChange={e=>setOpenCash(Number(e.target.value)||0)}
-                />
-                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>
-                  Buka Shift
-                </button>
+                <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Kas awal (Rp)"
+                       value={openCash} onChange={e=>setOpenCash(Number(e.target.value)||0)} />
+                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>Buka Shift</button>
               </>
             ) : (
-              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>
-                Tutup Shift
-              </button>
+              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>Tutup Shift</button>
             )}
           </div>
         </div>
@@ -635,7 +605,6 @@ export default function App() {
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
-            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -643,29 +612,19 @@ export default function App() {
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
-
-            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
                 <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr>
-                  </thead>
+                  <thead><tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr></thead>
                   <tbody>
-                    {todayStats.topItems.length===0 && (
-                      <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>
-                    )}
+                    {todayStats.topItems.length===0 && <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>}
                     {todayStats.topItems.map((t,i)=>(
-                      <tr key={i} className="border-b">
-                        <td className="py-2">{t.name}</td>
-                        <td className="text-right">{t.qty}</td>
-                      </tr>
+                      <tr key={i} className="border-b"><td className="py-2">{t.name}</td><td className="text-right">{t.qty}</td></tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
@@ -674,9 +633,8 @@ export default function App() {
                     <div key={d.date} className="flex items-center gap-3">
                       <div className="w-24 text-xs text-neutral-600">{d.date}</div>
                       <div className="flex-1 h-2 rounded bg-neutral-100 overflow-hidden">
-                        <div
-                          className="h-2 rounded bg-emerald-500"
-                          style={{width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x=>x.omzet))))) * 100}%`}} />
+                        <div className="h-2 rounded bg-emerald-500"
+                             style={{width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x=>x.omzet))))) * 100}%`}} />
                       </div>
                       <div className="w-28 text-right text-xs">{IDR(d.omzet)}</div>
                       <div className="w-10 text-right text-xs">{d.trx}</div>
@@ -694,24 +652,18 @@ export default function App() {
             {/* Products */}
             <div className="md:col-span-7">
               <div className="bg-white rounded-2xl border p-3 mb-2">
-                <input
-                  className="border rounded-lg px-3 py-2 w-full"
-                  placeholder="Cari menu…"
-                  value={queryText}
-                  onChange={e=>setQueryText(e.target.value)}
-                />
+                <input className="border rounded-lg px-3 py-2 w-full" placeholder="Cari menu…"
+                       value={queryText} onChange={e=>setQueryText(e.target.value)} />
               </div>
-
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                 {filteredProducts.map(p=>(
-                  <button
-                    key={p.id}
-                    onClick={()=>setCart(prev=>{
-                      const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
-                      if(same) return prev.map(ci=> ci===same? {...ci, qty:ci.qty+1 } : ci);
-                      return [...prev, { id: uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: noteInput||undefined }];
-                    })}
-                    className="bg-white rounded-2xl border p-3 text-left hover:shadow">
+                  <button key={p.id}
+                          onClick={()=>setCart(prev=>{
+                            const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
+                            if(same) return prev.map(ci=> ci===same? {...ci, qty:ci.qty+1 } : ci);
+                            return [...prev, { id: uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: noteInput||undefined }];
+                          })}
+                          className="bg-white rounded-2xl border p-3 text-left hover:shadow">
                     <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
                       {p.imageUrl ? <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/> : null}
                     </div>
@@ -728,8 +680,10 @@ export default function App() {
               <div className="bg-white rounded-2xl border p-3">
                 {/* Customer */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
-                  <input className="border rounded-lg px-3 py-2" placeholder="No HP pelanggan" value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} />
-                  <input className="border rounded-lg px-3 py-2" placeholder="Nama pelanggan (baru)" value={customerName} onChange={e=>setCustomerName(e.target.value)} />
+                  <input className="border rounded-lg px-3 py-2" placeholder="No HP pelanggan"
+                         value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} />
+                  <input className="border rounded-lg px-3 py-2" placeholder="Nama pelanggan (baru)"
+                         value={customerName} onChange={e=>setCustomerName(e.target.value)} />
                 </div>
                 {!!customerPhone && (
                   <div className="text-xs text-neutral-600 mb-2">
@@ -740,17 +694,16 @@ export default function App() {
                 )}
                 <div className="mb-2">
                   <label className="inline-flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={useFreeDrink}
-                      onChange={e=>setUseFreeDrink(e.target.checked)}
-                      disabled={!customerPoints || customerPoints<FREE_DRINK_POINTS}/>
+                    <input type="checkbox" checked={useFreeDrink}
+                           onChange={e=>setUseFreeDrink(e.target.checked)}
+                           disabled={!customerPoints || customerPoints<FREE_DRINK_POINTS}/>
                     Tukar {FREE_DRINK_POINTS} poin untuk 1 minuman gratis
                   </label>
                 </div>
 
                 <div className="flex items-center gap-2 mb-2">
-                  <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={noteInput} onChange={e=>setNoteInput(e.target.value)} />
+                  <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)"
+                         value={noteInput} onChange={e=>setNoteInput(e.target.value)} />
                   <button className="px-3 py-2 rounded-lg border" onClick={()=>setNoteInput("")}>Clear</button>
                 </div>
 
@@ -766,9 +719,11 @@ export default function App() {
                         </div>
                         <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
                         <div className="col-span-3 flex items-center justify-end gap-2">
-                          <button className="px-2 py-1 border rounded" onClick={()=>setCart(prev=>prev.map(x=>x.id===ci.id?{...x, qty:Math.max(1,x.qty-1)}:x))}>-</button>
+                          <button className="px-2 py-1 border rounded"
+                                  onClick={()=>setCart(prev=>prev.map(x=>x.id===ci.id?{...x, qty:Math.max(1,x.qty-1)}:x))}>-</button>
                           <div className="w-8 text-center font-medium">{ci.qty}</div>
-                          <button className="px-2 py-1 border rounded" onClick={()=>setCart(prev=>prev.map(x=>x.id===ci.id?{...x, qty:x.qty+1}:x))}>+</button>
+                          <button className="px-2 py-1 border rounded"
+                                  onClick={()=>setCart(prev=>prev.map(x=>x.id===ci.id?{...x, qty:x.qty+1}:x))}>+</button>
                         </div>
                         <div className="col-span-1 text-right">
                           <button className="px-2 py-1 rounded border" onClick={()=>setCart(prev=>prev.filter(x=>x.id!==ci.id))}>x</button>
@@ -810,13 +765,8 @@ export default function App() {
                   </select>
                   {payMethod==="cash" && (
                     <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        className="border rounded-lg px-3 py-2 w-40"
-                        placeholder="Tunai diterima"
-                        value={cash}
-                        onChange={e=>setCash(Number(e.target.value)||0)}
-                      />
+                      <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Tunai diterima"
+                             value={cash} onChange={e=>setCash(Number(e.target.value)||0)} />
                       <div className="text-sm">Kembali: <b>{IDR(Math.max(0,(cash||0)-total))}</b></div>
                     </div>
                   )}
@@ -831,20 +781,17 @@ export default function App() {
 
                 {/* actions */}
                 <div className="flex justify-between gap-2">
-                  <button
-                    className="px-3 py-2 rounded-lg border"
-                    onClick={()=>{
-                      setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setCash(0);
-                      setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); setUseFreeDrink(false);
-                    }}>
+                  <button className="px-3 py-2 rounded-lg border"
+                          onClick={()=>{
+                            setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setCash(0);
+                            setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); setUseFreeDrink(false);
+                          }}>
                     Bersihkan
                   </button>
                   <div className="flex gap-2">
                     <button className="px-3 py-2 rounded-lg border" disabled={cart.length===0} onClick={printReceipt}>Print Draf</button>
-                    <button
-                      className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
-                      disabled={cart.length===0}
-                      onClick={finalizeSale}>
+                    <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
+                            disabled={cart.length===0} onClick={finalizeSale}>
                       Selesai & Cetak
                     </button>
                   </div>
@@ -901,15 +848,14 @@ export default function App() {
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>{ setShowProdModal(true); setProdForm({ id: undefined, name:"", price:0, imageUrl:"", category:"Signature", active:true }); }}>
-                + Tambah
-              </button>
+              <button className="px-3 py-2 rounded-lg border" onClick={()=>{
+                setProdForm({ id: undefined, name:"", price:0, imageUrl:"", category:"Signature", active:true });
+                setShowProdModal(true);
+              }}>+ Tambah</button>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr>
-                </thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr></thead>
                 <tbody>
                   {products.map(p=>(
                     <tr key={p.id} className="border-b">
@@ -950,9 +896,7 @@ export default function App() {
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Minimal</th><th className="text-right">Aksi</th></tr>
-                </thead>
+                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Minimal</th><th className="text-right">Aksi</th></tr></thead>
                 <tbody>
                   {ingredients.map(i=>(
                     <tr key={i.id} className={`border-b ${i.min && i.stock<=i.min ? "bg-amber-50" : ""}`}>
@@ -974,17 +918,14 @@ export default function App() {
                   ))}
                 </tbody>
               </table>
-              {ingredients.length===0 && (
-                <div className="text-sm text-neutral-500">Belum ada data inventori.</div>
-              )}
+              {ingredients.length===0 && (<div className="text-sm text-neutral-500">Belum ada data inventori.</div>)}
             </div>
           </section>
         )}
       </main>
 
       {/* === MODALS === */}
-
-      {/* Product Modal */}
+      {/* Product */}
       {showProdModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowProdModal(false)}>
           <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
@@ -1001,22 +942,21 @@ export default function App() {
             </div>
             <div className="mt-3 flex justify-end gap-2">
               <button className="px-3 py-2 border rounded" onClick={()=>setShowProdModal(false)}>Batal</button>
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded"
-                onClick={async ()=>{
-                  if(!isOwner) return alert("Hanya owner.");
-                  if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
-                  const id = prodForm.id || uid();
-                  await setDoc(doc(db,"products",id), {
-                    outlet: OUTLET,
-                    name: prodForm.name,
-                    price: Number(prodForm.price||0),
-                    imageUrl: prodForm.imageUrl || "",
-                    category: prodForm.category || "Signature",
-                    active: prodForm.active!==false
-                  }, { merge:true });
-                  setShowProdModal(false);
-                }}>
+              <button className="px-3 py-2 bg-emerald-600 text-white rounded"
+                      onClick={async ()=>{
+                        if(!isOwner) return alert("Hanya owner.");
+                        if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
+                        const id = prodForm.id || uid();
+                        await setDoc(doc(db,"products",id), {
+                          outlet: OUTLET,
+                          name: prodForm.name,
+                          price: Number(prodForm.price||0),
+                          imageUrl: prodForm.imageUrl || "",
+                          category: prodForm.category || "Signature",
+                          active: prodForm.active!==false
+                        }, { merge:true });
+                        setShowProdModal(false);
+                      }}>
                 Simpan
               </button>
             </div>
@@ -1024,7 +964,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Ingredient Modal */}
+      {/* Ingredient */}
       {showIngModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowIngModal(false)}>
           <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
@@ -1037,21 +977,20 @@ export default function App() {
             </div>
             <div className="mt-3 flex justify-end gap-2">
               <button className="px-3 py-2 border rounded" onClick={()=>setShowIngModal(false)}>Batal</button>
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded"
-                onClick={async ()=>{
-                  if(!isOwner) return alert("Hanya owner.");
-                  if(!ingForm.name) return alert("Nama bahan wajib diisi.");
-                  const id = ingForm.id || uid();
-                  await setDoc(doc(db,"ingredients",id), {
-                    outlet: OUTLET,
-                    name: ingForm.name,
-                    unit: ingForm.unit||"pcs",
-                    stock: Number(ingForm.stock||0),
-                    min: Number(ingForm.min||0)
-                  }, { merge:true });
-                  setShowIngModal(false);
-                }}>
+              <button className="px-3 py-2 bg-emerald-600 text-white rounded"
+                      onClick={async ()=>{
+                        if(!isOwner) return alert("Hanya owner.");
+                        if(!ingForm.name) return alert("Nama bahan wajib diisi.");
+                        const id = ingForm.id || uid();
+                        await setDoc(doc(db,"ingredients",id), {
+                          outlet: OUTLET,
+                          name: ingForm.name,
+                          unit: ingForm.unit||"pcs",
+                          stock: Number(ingForm.stock||0),
+                          min: Number(ingForm.min||0)
+                        }, { merge:true });
+                        setShowIngModal(false);
+                      }}>
                 Simpan
               </button>
             </div>
@@ -1059,7 +998,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Recipe Modal */}
+      {/* Recipe */}
       {showRecipeModal && recipeProduct && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowRecipeModal(false)}>
           <div className="bg-white rounded-2xl p-4 w-full max-w-lg" onClick={e=>e.stopPropagation()}>
@@ -1067,19 +1006,12 @@ export default function App() {
             <div className="space-y-2">
               {recipeRows.map((r,idx)=>(
                 <div key={idx} className="grid grid-cols-6 gap-2">
-                  <select
-                    className="col-span-4 border rounded-lg px-2 py-2"
-                    value={r.ingredientId}
-                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}
-                  >
+                  <select className="col-span-4 border rounded-lg px-2 py-2" value={r.ingredientId}
+                          onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}>
                     {ingredients.map(ing=><option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
                   </select>
-                  <input
-                    type="number"
-                    className="col-span-1 border rounded-lg px-2 py-2"
-                    value={r.qty}
-                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}
-                  />
+                  <input type="number" className="col-span-1 border rounded-lg px-2 py-2" value={r.qty}
+                         onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}/>
                   <button className="col-span-1 border rounded" onClick={()=>setRecipeRows(prev=>prev.filter((_,i)=>i!==idx))}>x</button>
                 </div>
               ))}
@@ -1087,14 +1019,13 @@ export default function App() {
             </div>
             <div className="mt-3 flex justify-end gap-2">
               <button className="px-3 py-2 border rounded" onClick={()=>setShowRecipeModal(false)}>Batal</button>
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded"
-                onClick={async ()=>{
-                  if(!isOwner) return alert("Hanya owner.");
-                  const clean = recipeRows.filter(r => r.ingredientId && r.qty>0);
-                  await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
-                  setShowRecipeModal(false);
-                }}>
+              <button className="px-3 py-2 bg-emerald-600 text-white rounded"
+                      onClick={async ()=>{
+                        if(!isOwner) return alert("Hanya owner.");
+                        const clean = recipeRows.filter(r => r.ingredientId && r.qty>0);
+                        await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
+                        setShowRecipeModal(false);
+                      }}>
                 Simpan Resep
               </button>
             </div>
@@ -1113,14 +1044,12 @@ export default function App() {
       )}
     </div>
   );
-} // <- end of App()
+} // end App
 
-/* Small helpers for modal inputs (prevent uncontrolled->controlled glitches) */
+/* ===== helpers ===== */
 function igFormSafe<T extends string | number | undefined>(v: T, fallback: any = "") {
   return (v===undefined || v===null) ? fallback : v;
 }
-
-/* Small KPI UI */
 function KPI({title, value}:{title:string; value:string}) {
   return (
     <div className="bg-white border rounded-2xl p-4">
@@ -1129,39 +1058,35 @@ function KPI({title, value}:{title:string; value:string}) {
     </div>
   );
 }
+
 /* ===========================================================
-   PUBLIC ORDER PAGE (tanpa login)
-   =========================================================== */
-//  -- penjelasan --
-//  URL:  https://namipos.vercel.app/order?outlet=MTHaryono
-//  pelanggan dapat memilih produk aktif, memasukkan nama, nomor HP, alamat, jarak, dan metode pembayaran (QRIS/COD)
+   PUBLIC ORDER PAGE (tanpa login) — /order?outlet=...
+=========================================================== */
+function PublicOrder() {
+  const outlet = (() => {
+    try { return new URLSearchParams(window.location.search).get("outlet") || OUTLET; }
+    catch { return OUTLET; }
+  })();
 
-import ReactDOM from "react-dom/client";
-import { useSearchParams } from "react-router-dom";
-import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
-
-export function PublicOrder() {
-  const [params] = useSearchParams();
-  const outlet = params.get("outlet") || "MTHaryono";
   const [loading, setLoading] = useState(true);
   const [menu, setMenu] = useState<Product[]>([]);
   const [cart, setCart] = useState<CartItem[]>([]);
   const [custName, setCustName] = useState("");
   const [custPhone, setCustPhone] = useState("");
   const [custAddr, setCustAddr] = useState("");
-  const [distance, setDistance] = useState<number>(0);
+  const [distance, setDistance] = useState<number>(1);
   const [method, setMethod] = useState<"qris"|"cod">("qris");
   const [sending, setSending] = useState(false);
 
   const subtotal = useMemo(()=>cart.reduce((s,i)=>s+i.price*i.qty,0),[cart]);
   const shipping = useMemo(()=>calcShipping(distance),[distance]);
-  const total = subtotal+shipping;
+  const total = subtotal + shipping;
 
   useEffect(()=>{
     (async()=>{
-      const qProd = query(collection(db,"products"), where("outlet","==",outlet), where("active","==",true));
-      const snap = await getDocs(qProd);
-      const rows:Product[] = snap.docs.map(d=>({id:d.id,...(d.data() as any)}));
+      const q = query(collection(db,"products"), where("outlet","==",outlet), where("active","==",true));
+      const snap = await getDocs(q);
+      const rows: Product[] = snap.docs.map(d=>({id:d.id, ...(d.data() as any)}));
       setMenu(rows);
       setLoading(false);
     })();
@@ -1169,9 +1094,9 @@ export function PublicOrder() {
 
   async function submitOrder(){
     if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
-    if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas dan alamat.");
+    if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
     setSending(true);
-    const saleData = {
+    const data = {
       outlet,
       source:"public",
       customerName:custName,
@@ -1183,11 +1108,10 @@ export function PublicOrder() {
       items: cart.map(c=>({name:c.name,price:c.price,qty:c.qty})),
       subtotal, shipping, total, status:"pending"
     };
-    await addDoc(collection(db,"orders"), saleData);
+    await addDoc(collection(db,"orders"), data);
     setSending(false);
-    alert("Pesanan terkirim ✅\nSilakan tunggu konfirmasi admin.");
-    setCart([]);
-    setCustName(""); setCustPhone(""); setCustAddr(""); setDistance(0);
+    alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
+    setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistance(1);
   }
 
   if(loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
@@ -1205,15 +1129,14 @@ export function PublicOrder() {
         <textarea className="border rounded-lg px-3 py-2 w-full mb-2" rows={2} placeholder="Alamat pengantaran" value={custAddr} onChange={e=>setCustAddr(e.target.value)} />
         <label className="flex items-center gap-2 mb-4 text-sm">
           <span>Jarak (km)</span>
-          <input type="number" className="border rounded-lg px-2 py-1 w-20" value={distance} onChange={e=>setDistance(Number(e.target.value)||0)} />
+          <input type="number" className="border rounded-lg px-2 py-1 w-20" min={1} value={distance} onChange={e=>setDistance(Number(e.target.value)||1)} />
           <span className="text-neutral-500 text-xs">1 km pertama gratis • {IDR(calcShipping(distance))}</span>
         </label>
 
         {/* Menu list */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-4">
           {menu.map(p=>(
-            <button
-              key={p.id}
+            <button key={p.id}
               onClick={()=>setCart(prev=>{
                 const same=prev.find(ci=>ci.productId===p.id);
                 if(same) return prev.map(ci=>ci.productId===p.id?{...ci,qty:ci.qty+1}:ci);
@@ -1266,21 +1189,12 @@ export function PublicOrder() {
           {method==="qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
         </div>
 
-        <button
-          disabled={sending}
-          className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
-          onClick={submitOrder}>
+        <button disabled={sending}
+                className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
+                onClick={submitOrder}>
           {sending?"Mengirim...":"Kirim Pesanan"}
         </button>
       </div>
     </div>
   );
-}
-
-/* ===========================================================
-   ENTRY POINT DETECTOR (jika /order maka render PublicOrder)
-   =========================================================== */
-if (window.location.pathname === "/order") {
-  const root = ReactDOM.createRoot(document.getElementById("root")!);
-  root.render(<PublicOrder />);
 }
