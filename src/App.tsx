@@ -436,7 +436,7 @@ export default function App() {
         name: c.name,
         price: c.price,
         qty: c.qty,
-        ...(c.note ? { note: c.note } : {}),
+        ...(c.note && { note: c.note }),
       })),
       subtotal,
       discount,
