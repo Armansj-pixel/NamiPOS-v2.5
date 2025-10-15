@@ -102,7 +102,7 @@ async function checkShortageForCart(cartPairs: { productId: string; qty: number 
   const shortages: { name: string; need: number; have: number; unit: string }[] = [];
   for (const ingId of Array.from(ingNeeds.keys())) {
     const snap = await getDoc(doc(db, "ingredients", ingId));
-    if (!snap.exists()) { shortages.push({ name: `#${igId}`, need: ingNeeds.get(ingId) || 0, have: 0, unit: "-" }); continue; }
+    if (!snap.exists()) { shortages.push({ name: `#${ingId}`, need: ingNeeds.get(ingId) || 0, have: 0, unit: "-" }); continue; }
     const d = snap.data() as any;
     const need = ingNeeds.get(ingId) || 0;
     const have = Number(d.stock || 0);
