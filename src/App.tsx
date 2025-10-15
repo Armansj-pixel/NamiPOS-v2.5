@@ -1540,6 +1540,18 @@ export function PublicOrder() {
 
   try {
     await addDoc(collection(db, "orders"), data);
+// Kirim notifikasi Telegram
+try {
+  await fetch("/api/notify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text: `📦 Pesanan Baru!\n👤 ${custName} (${custPhone})\n🏠 ${custAddr}\n📍 Outlet: ${outlet}\n🧾 Total: Rp${total.toLocaleString()}\n💳 Metode: ${method.toUpperCase()}`
+    })
+  });
+} catch (err) {
+  console.error("Gagal kirim notifikasi:", err);
+}
     alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
     setCart([]);
     setCustName("");
