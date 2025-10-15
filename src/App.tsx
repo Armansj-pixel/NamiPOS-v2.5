@@ -57,6 +57,7 @@ type PublicOrderDoc = {
 /* ==========================
    UTILITIES
 ========================== */
+const uid = () => Math.random().toString(36).slice(2, 10);
 const IDR = (n: number) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
 const calcShipping = (km: number) => Math.ceil(Math.max(0, km - 1)) * SHIPPING_PER_KM;
 const param = (k: string, def = "") => { try { return new URLSearchParams(window.location.search).get(k) || def; } catch { return def; } };
