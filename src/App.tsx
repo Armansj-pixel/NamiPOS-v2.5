@@ -171,32 +171,34 @@ function PublicOrder() {
   const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
 
   async function submitOrder(){
-    if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
-    if(!custName.trim() || !custPhone.trim() || !custAddr.trim()) return alert("Lengkapi nama, HP, dan alamat.");
-    try{
-      setSending(true);
-      await addDoc(collection(db,"orders"), {
-        outlet: OUTLET,
-        source: "public",
-        customerName: custName.trim(),
-        customerPhone: custPhone.trim(),
-        address: custAddr.trim(),
-        distance: Number(distanceKm)||1,
-        method,
-        time: serverTimestamp(),
-        items: cart.map(i=>({ name:i.name, price:i.price, qty:i.qty, ...(i.note?{note:i.note}:{}) })),
-        subtotal, shipping, total,
-        status: "pending"
-      });
-      if(method==="qris") alert("Pesanan terkirim. Silakan selesaikan pembayaran QRIS dan tunggu konfirmasi admin.");
-      else alert("Pesanan terkirim. Admin akan menghubungi Anda untuk konfirmasi.");
-      setCart([]); setNote(""); setCustName(""); setCustPhone(""); setCustAddr(""); setDistanceKm(1);
-    }catch(e:any){
-      alert("Gagal mengirim pesanan: "+(e?.message||e));
-    }finally{
-      setSending(false);
-    }
+  if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
+  if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
+
+  setSending(true);
+  try{
+    await addDoc(collection(db,"orders"), {
+      outlet,                     // pastikan ini sama dengan konstanta OUTLET di atas (mis. "MTHaryono")
+      source: "public",
+      customerName: custName,
+      customerPhone: custPhone,
+      address: custAddr,
+      distance,
+      method,
+      time: serverTimestamp(),    // WAJIB pakai "time" (admin baca pakai ini)
+      items: cart.map(c=>({ name:c.name, price:c.price, qty:c.qty })),
+      subtotal,
+      shipping: calcShipping(distance),
+      total: subtotal + calcShipping(distance),
+      status: "pending"
+    });
+    alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
+    setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistance(1);
+  }catch(e:any){
+    alert("Gagal mengirim pesanan: "+(e?.message||e));
+  }finally{
+    setSending(false);
   }
+}
 
   return (
     <div className="min-h-screen bg-neutral-50">
@@ -426,35 +428,35 @@ export default function App() {
     });
 
     // orders (pending & accepted)
-    const qOrd = query(
-      collection(db,"orders"),
-      where("outlet","==",OUTLET),
-      where("status","in",["pending","accepted"]),
-      orderBy("time","desc")
-    );
-    const unsubOrd = onSnapshot(qOrd, snap=>{
-      const rows: PublicOrderDoc[] = snap.docs.map(d=>{
-        const x = d.data() as any;
-        return {
-          id: d.id,
-          outlet: x.outlet,
-          source: "public",
-          customerName: x.customerName,
-          customerPhone: x.customerPhone,
-          address: x.address,
-          distance: x.distance || 0,
-          method: x.method,
-          time: x.time ?? null,
-          items: x.items || [],
-          subtotal: x.subtotal || 0,
-          shipping: x.shipping || 0,
-          total: x.total || 0,
-          status: x.status,
-          saleId: x.saleId
-        };
-      });
-      setOrders(rows);
-    });
+const qOrd = query(
+  collection(db,"orders"),
+  where("outlet","==",OUTLET),
+  where("status","in",["pending","accepted"]),
+  orderBy("time","desc")
+);
+const unsubOrd = onSnapshot(qOrd, snap=>{
+  const rows: PublicOrderDoc[] = snap.docs.map(d=>{
+    const x = d.data() as any;
+    return {
+      id: d.id,
+      outlet: x.outlet,
+      source: "public",
+      customerName: x.customerName,
+      customerPhone: x.customerPhone,
+      address: x.address,
+      distance: x.distance || 0,
+      method: x.method,
+      time: x.time ?? null,
+      items: x.items || [],
+      subtotal: x.subtotal || 0,
+      shipping: x.shipping || 0,
+      total: x.total || 0,
+      status: x.status,
+      saleId: x.saleId
+    };
+  });
+  setOrders(rows);
+});
 
     // shift & dashboard
     checkActiveShift().catch(()=>{});
