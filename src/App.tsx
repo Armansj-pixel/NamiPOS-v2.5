@@ -1506,169 +1506,48 @@ export function PublicOrder() {
     })();
   }, [outlet]);
 
-  async function submitOrder() {
-    if (cart.length === 0) return alert("Pilih menu terlebih dahulu.");
-    if (!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
-    setSending(true);
-    const data = {
-      outlet,
-      source: "public",
-      customerName: custName,
-      customerPhone: custPhone,
-      address: custAddr,
-      distance: distanceKm,
-      method,
-      time: serverTimestamp(),
-      items: cart.map((c) => ({ productId: c.productId, name: c.name, price: c.price, qty: c.qty })),
-      subtotal,
-      shipping,
-      total,
-      status: "pending",
-    };
-    await addDoc(collection(db, "orders"), data);
-    setSending(false);
-    alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
-    setCart([]);
-    setCustName("");
-    setCustPhone("");
-    setCustAddr("");
-    setDistanceKm(0);
-  }
+  async function submitOrder(){
+  if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
+  if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
 
-  if (loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
+  setSending(true);
+  const data = {
+    outlet,
+    source:"public",
+    customerName:custName,
+    customerPhone:custPhone,
+    address:custAddr,
+    distance: distanceKm,
+    method,
+    time: serverTimestamp(),
+    items: cart.map(c=>({productId:c.productId, name:c.name, price:c.price, qty:c.qty})),
+    subtotal, shipping, total, status:"pending"
+  };
 
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white p-4">
-      <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow p-4">
-        <div className="flex items-center gap-3 mb-3">
-          <img src={BRAND_LOGO} alt="Logo" className="h-9 w-9 rounded-xl object-cover" />
-          <h1 className="text-2xl font-bold">Pesan Online — {outlet}</h1>
-        </div>
+  // simpan order
+  const ref = await addDoc(collection(db,"orders"), data);
 
-        {/* Data pelanggan */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
-          <input
-            className="border rounded-lg px-3 py-2"
-            placeholder="Nama lengkap"
-            value={custName}
-            onChange={(e) => setCustName(e.target.value)}
-          />
-          <input
-            className="border rounded-lg px-3 py-2"
-            placeholder="No HP"
-            value={custPhone}
-            onChange={(e) => setCustPhone(e.target.value)}
-          />
-        </div>
-        <textarea
-          className="border rounded-lg px-3 py-2 w-full mb-2"
-          rows={2}
-          placeholder="Alamat pengantaran"
-          value={custAddr}
-          onChange={(e) => setCustAddr(e.target.value)}
-        />
-        <label className="flex items-center gap-2 mb-4 text-sm">
-          <span>Jarak (km)</span>
-          <input
-            type="number"
-            className="border rounded-lg px-2 py-1 w-24"
-            value={distanceKm}
-            onChange={(e) => setDistanceKm(Number(e.target.value) || 0)}
-          />
-          <span className="text-neutral-500 text-xs">
-            1 km pertama gratis • {IDR(calcShipping(distanceKm))}
-          </span>
-        </label>
+  // panggil serverless function (token tetap aman di server)
+  try {
+    await fetch("/api/notify", {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify({
+        orderId: ref.id,
+        outlet,
+        customerName: custName,
+        customerPhone: custPhone,
+        address: custAddr,
+        distance: distanceKm,
+        method,
+        items: cart.map(c=>({ name:c.name, qty:c.qty, price:c.price })),
+        subtotal, shipping, total,
+        timeISO: new Date().toLocaleString("id-ID", { hour12:false })
+      })
+    });
+  } catch {}
 
-        {/* Menu list */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-          {menu.map((p) => (
-            <button
-              key={p.id}
-              onClick={() =>
-                setCart((prev) => {
-                  const same = prev.find((ci) => ci.productId === p.id);
-                  if (same)
-                    return prev.map((ci) => (ci.productId === p.id ? { ...ci, qty: ci.qty + 1 } : ci));
-                  return [...prev, { id: uid(), productId: p.id, name: p.name, price: p.price, qty: 1 }];
-                })
-              }
-              className="bg-white border rounded-2xl p-3 text-left hover:shadow"
-            >
-              <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
-                {p.imageUrl && <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover" />}
-              </div>
-              <div className="font-medium">{p.name}</div>
-              <div className="text-xs text-neutral-500">{p.category || "Signature"}</div>
-              <div className="font-semibold mt-1">{IDR(p.price)}</div>
-            </button>
-          ))}
-        </div>
-
-        {/* Cart */}
-        <div className="bg-neutral-50 border rounded-2xl p-3 mb-4">
-          {cart.length === 0 ? (
-            <div className="text-sm text-neutral-500">Belum ada item dipilih.</div>
-          ) : (
-            <div className="space-y-2">
-              {cart.map((ci) => (
-                <div key={ci.id} className="flex items-center justify-between border rounded-xl p-2">
-                  <div>
-                    <div className="font-medium">{ci.name}</div>
-                    <div className="text-xs text-neutral-500">
-                      {ci.qty} × {IDR(ci.price)}
-                    </div>
-                  </div>
-                  <button
-                    className="px-2 py-1 border rounded"
-                    onClick={() => setCart((prev) => prev.filter((x) => x.id !== ci.id))}
-                  >
-                    x
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          {cart.length > 0 && (
-            <div className="mt-3 space-y-1 text-sm">
-              <div className="flex justify-between">
-                <span>Subtotal</span>
-                <span>{IDR(subtotal)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>Ongkir</span>
-                <span>{IDR(shipping)}</span>
-              </div>
-              <div className="flex justify-between font-semibold">
-                <span>Total</span>
-                <span>{IDR(total)}</span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Metode bayar */}
-        <div className="mb-4">
-          <label className="block mb-1 text-sm font-medium">Metode pembayaran</label>
-          <select
-            className="border rounded-lg px-3 py-2"
-            value={method}
-            onChange={(e) => setMethod(e.target.value as any)}
-          >
-            <option value="qris">QRIS (online)</option>
-            <option value="cod">Bayar di Tempat (COD)</option>
-          </select>
-          {method === "qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
-        </div>
-
-        <button
-          disabled={sending}
-          className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
-          onClick={submitOrder}
-        >
-          {sending ? "Mengirim..." : "Kirim Pesanan"}
-        </button>
-      </div>
-    </div>
-  );
+  setSending(false);
+  alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
+  setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistanceKm(0);
 }
