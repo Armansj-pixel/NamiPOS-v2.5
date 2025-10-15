@@ -1,6 +1,7 @@
-/* App.tsx — NamiPOS v2.5.5 (fixed build full)
-   Fitur: POS, Shift, Produk, Inventori, Resep (auto stock), Loyalty (15k=1 poin),
-   Riwayat (hapus by owner), Dashboard, Public Order (/order?outlet=...)
+/* App.tsx — NamiPOS v2.5.5 (full, single file)
+   Fitur: POS, Shift, Produk, Inventori, Resep (auto stock), Loyalty (15k=1 poin; 10 poin=1 gratis),
+   Riwayat (hapus by owner), Dashboard, Orders (terima/tolak/selesai),
+   Public Order (tanpa login) di /order
 */
 
 import React, { useEffect, useMemo, useState } from "react";
@@ -20,10 +21,13 @@ const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
+// aset (taruh di /public)
 const BRAND_LOGO = "/brand-logo.png";
 const QRIS_IMG_SRC = "/qris.png";
-const POINT_PER_RP = 15000;
-const FREE_DRINK_POINTS = 10;
+// loyalty & ongkir
+const POINT_PER_RP = 15000;     // kelipatan rupiah per poin
+const FREE_DRINK_POINTS = 10;   // tukar 10 poin = 1 gratis
+const SHIPPING_PER_KM = 2000;   // 1 km pertama gratis, lanjut 2.000/km
 
 /* ==========================
    TYPES
@@ -48,6 +52,23 @@ type Sale = {
   total: number; payMethod: "cash" | "ewallet" | "qris"; cash?: number; change?: number;
   pointsEarned?: number; usedFreeDrink?: boolean;
 };
+type PublicOrderDoc = {
+  id: string;
+  outlet: string;
+  source: "public";
+  customerName: string;
+  customerPhone: string;
+  address: string;
+  distance: number;
+  method: "qris" | "cod";
+  time: Timestamp | null;
+  items: { productId?: string; name: string; price: number; qty: number; note?: string }[];
+  subtotal: number;
+  shipping: number;
+  total: number;
+  status: "pending" | "accepted" | "rejected" | "done";
+  saleId?: string;
+};
 
 /* ==========================
    UTILITIES
@@ -58,12 +79,12 @@ const IDR = (n: number) =>
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 const endOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
 const daysAgo = (n: number) => { const x = new Date(); x.setDate(x.getDate() - n); return x; };
-const getQueryParam = (k: string) => { try { return new URLSearchParams(window.location.search).get(k) || ""; } catch { return ""; } };
-
-// Ongkir: 1 km pertama gratis, setelahnya 2.000/km (dibulatkan ke atas)
+const param = (k: string, def = "") => {
+  try { return new URLSearchParams(window.location.search).get(k) || def; } catch { return def; }
+};
 const calcShipping = (km: number) => {
   const afterFree = Math.max(0, (Number.isFinite(km) ? km : 1) - 1);
-  return Math.ceil(afterFree) * 2000;
+  return Math.ceil(afterFree) * SHIPPING_PER_KM;
 };
 
 /* ==========================
@@ -75,7 +96,6 @@ async function fetchRecipe(productId: string): Promise<RecipeDoc | null> {
   const x = r.data() as any;
   return { id: r.id, items: Array.isArray(x.items) ? x.items : [] };
 }
-
 async function checkShortageForCart(cartPairs: { productId: string; qty: number }[]) {
   const ingNeeds = new Map<string, number>();
   for (const pair of cartPairs) {
@@ -102,7 +122,6 @@ async function checkShortageForCart(cartPairs: { productId: string; qty: number 
   if (shortages.length) return { ok: false as const, shortages };
   return { ok: true as const };
 }
-
 async function deductStockForCart(cartPairs: { productId: string; qty: number }[]) {
   for (const pair of cartPairs) {
     const recipe = await fetchRecipe(pair.productId);
@@ -119,10 +138,9 @@ async function deductStockForCart(cartPairs: { productId: string; qty: number }[
 }
 
 /* ==========================
-   APP (state, auth, data, shift, loyalty, finalize, print, history, dashboard)
+   APP
 ========================== */
 export default function App() {
-  // Public Order detector: kalau path "/order" render PublicOrder tanpa login
   const isPublicOrder = typeof window !== "undefined" && window.location.pathname === "/order";
   if (isPublicOrder) return <PublicOrder />;
 
@@ -131,7 +149,7 @@ export default function App() {
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory"|"orders">("pos");
 
   /* ---- login form ---- */
   const [email, setEmail] = useState(""); 
@@ -174,16 +192,9 @@ export default function App() {
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
-  /* ---- editor states (Produk, Ingredient, Resep) ---- */
-  const [showProdModal, setShowProdModal] = useState(false);
-  const [prodForm, setProdForm] = useState<Partial<Product>>({ name:"", price:0, imageUrl:"", category:"Signature", active:true });
-
-  const [showIngModal, setShowIngModal] = useState(false);
-  const [ingForm, setIngForm] = useState<Partial<Ingredient>>({ name:"", unit:"pcs", stock:0, min:0 });
-
-  const [showRecipeModal, setShowRecipeModal] = useState(false);
-  const [recipeProduct, setRecipeProduct] = useState<Product | null>(null);
-  const [recipeRows, setRecipeRows] = useState<RecipeItem[]>([]);
+  /* ---- orders (public) ---- */
+  const [orders, setOrders] = useState<PublicOrderDoc[]>([]);
+  const [ordersLoading] = useState(false);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
@@ -223,7 +234,7 @@ export default function App() {
         return { id:d.id, name:x.name, price:x.price, imageUrl:x.imageUrl, category:x.category, active:x.active, outlet:x.outlet };
       });
       setProducts(rows);
-    }, err => alert("Memuat produk gagal.\n" + (err.message || err)));
+    });
 
     // ingredients
     const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
@@ -233,9 +244,9 @@ export default function App() {
         return { id:d.id, name:x.name, unit:x.unit, stock:x.stock??0, min:x.min??0, outlet:x.outlet };
       });
       setIngredients(rows);
-    }, err => alert("Memuat inventori gagal.\n" + (err.message || err)));
+    });
 
-    // recipes (preload)
+    // recipes (preload agar finalize cepat)
     const unsubRecipes = onSnapshot(collection(db,"recipes"), snap=>{
       const map: Record<string, RecipeItem[]> = {};
       snap.docs.forEach(d=>{
@@ -245,11 +256,42 @@ export default function App() {
       setRecipes(map);
     });
 
+    // orders (pending & accepted)
+    const qOrd = query(
+      collection(db,"orders"),
+      where("outlet","==",OUTLET),
+      where("status","in",["pending","accepted"]),
+      orderBy("time","desc")
+    );
+    const unsubOrd = onSnapshot(qOrd, snap=>{
+      const rows: PublicOrderDoc[] = snap.docs.map(d=>{
+        const x = d.data() as any;
+        return {
+          id: d.id,
+          outlet: x.outlet,
+          source: "public",
+          customerName: x.customerName,
+          customerPhone: x.customerPhone,
+          address: x.address,
+          distance: x.distance || 0,
+          method: x.method,
+          time: x.time ?? null,
+          items: x.items || [],
+          subtotal: x.subtotal || 0,
+          shipping: x.shipping || 0,
+          total: x.total || 0,
+          status: x.status,
+          saleId: x.saleId
+        };
+      });
+      setOrders(rows);
+    });
+
     // shift & dashboard
     checkActiveShift().catch(()=>{});
     loadDashboard().catch(()=>{});
 
-    return ()=>{ unsubProd(); unsubIng(); unsubRecipes(); };
+    return ()=>{ unsubProd(); unsubIng(); unsubRecipes(); unsubOrd(); };
     // eslint-disable-next-line
   },[user?.email]);
 
@@ -289,7 +331,6 @@ export default function App() {
       openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
     });
   }
-
   async function openShiftAction(){
     if(!user?.email) return alert("Belum login.");
     const id = `SHIFT-${Date.now()}`;
@@ -300,7 +341,6 @@ export default function App() {
     setOpenCash(0);
     await checkActiveShift();
   }
-
   async function closeShiftAction(){
     if(!activeShift?.id) return;
     await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
@@ -332,31 +372,23 @@ export default function App() {
   }
 
   /* ==========================
-     FINALIZE TRANSACTION
+     FINALIZE TRANSACTION (POS)
   =========================== */
   async function finalizeSale() {
     if (!activeShift?.id) return alert("Shift belum dibuka.");
     if (cart.length === 0) return alert("Keranjang kosong.");
     if (payMethod==="cash" && cash < total) return alert("Tunai kurang.");
 
-    // cek stok
     const shortage = await checkShortageForCart(cart.map(c => ({ productId: c.productId, qty: c.qty })));
     if (!shortage.ok) {
-      const msg = shortage.shortages
-        .map(s => `${s.name}: butuh ${s.need}${s.unit}, sisa ${s.have}`)
-        .join("\n");
-      alert("Stok tidak mencukupi:\n" + msg);
-      return;
+      return alert("Stok tidak mencukupi:\n" +
+        shortage.shortages.map(s => `${s.name}: butuh ${s.need}${s.unit}, sisa ${s.have}`).join("\n"));
     }
-
-    // kurangi stok
     await deductStockForCart(cart.map(c => ({ productId: c.productId, qty: c.qty })));
 
-    // loyalty
     const pointsEarned = Math.floor(total / POINT_PER_RP);
     const usedFreeDrink = useFreeDrink;
 
-    // simpan sale
     const saleData: Sale = {
       outlet: OUTLET,
       shiftId: activeShift.id,
@@ -370,9 +402,7 @@ export default function App() {
       pointsEarned, usedFreeDrink
     };
 
-    // cetak dulu (pakai state saat ini), lalu simpan + reset
-    printReceipt();
-
+    printReceipt(); // cetak dulu
     await addDoc(collection(db,"sales"), saleData);
 
     if (customerPhone) {
@@ -381,23 +411,25 @@ export default function App() {
     }
 
     alert("Transaksi berhasil ✅");
-
     // reset
     setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0);
     setCash(0); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
     setUseFreeDrink(false);
-
     // refresh
     loadHistory(false).catch(()=>{});
     loadDashboard().catch(()=>{});
   }
 
   /* ==========================
-     PRINT 80mm
+     CETAK 80mm
   =========================== */
   function printReceipt() {
     const win = window.open("", "_blank", "width=400,height=600");
     if (!win) return;
+    const loyaltyDiscount = useFreeDrink ? (cart.length ? Math.min(...cart.map(c=>c.price)) : 0) : 0;
+    const totalBefore = Math.max(0, subtotal + taxVal + svcVal - (discount||0));
+    const totalNow = Math.max(0, totalBefore - loyaltyDiscount);
+    const changeNow = Math.max(0, (cash||0) - totalNow);
     win.document.write(`
       <html><head><title>Struk</title>
       <style>
@@ -421,10 +453,10 @@ export default function App() {
           ${svcVal?`<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(svcVal)}</td></tr>`:""}
           ${discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(discount)}</td></tr>`:""}
           ${useFreeDrink?`<tr class="tot"><td>Tukar Poin</td><td></td><td style="text-align:right">-${IDR(loyaltyDiscount)}</td></tr>`:""}
-          <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(total)}</td></tr>
+          <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(totalNow)}</td></tr>
           ${payMethod==="cash"
             ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(cash||0)}</td></tr>
-               <tr><td>Kembali</td><td></td><td style='text-align:right'>${IDR(change||0)}</td></tr>`
+               <tr><td>Kembali</td><td></td><td style='text-align:right'>${IDR(changeNow||0)}</td></tr>`
             : `<tr><td>Metode</td><td></td><td style='text-align:right'>${payMethod.toUpperCase()}</td></tr>`
           }
         </table>
@@ -469,7 +501,6 @@ export default function App() {
       setHistoryLoading(false);
     }
   }
-
   async function deleteSale(id: string) {
     if (!isOwner) return alert("Hanya owner yang dapat menghapus transaksi.");
     if (!window.confirm("Hapus transaksi ini?")) return;
@@ -483,7 +514,7 @@ export default function App() {
   async function loadDashboard(){
     setDashLoading(true);
     try{
-      // Today
+      // Hari ini
       const qToday = query(
         collection(db,"sales"),
         where("outlet","==",OUTLET),
@@ -510,7 +541,7 @@ export default function App() {
         .slice(0,5);
       setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
-      // last 7 days
+      // 7 hari terakhir
       const arr: {date:string; omzet:number; trx:number}[] = [];
       for(let i=6;i>=0;i--){
         const start = Timestamp.fromDate(startOfDay(daysAgo(i)));
@@ -531,7 +562,53 @@ export default function App() {
     setDashLoading(false);
   }
 
-  // ======= UI RENDER =======
+  /* ==========================
+     ORDERS actions (admin)
+  =========================== */
+  async function acceptOrder(id:string){
+    await updateDoc(doc(db,"orders", id), { status: "accepted" });
+  }
+  async function rejectOrder(id:string){
+    await updateDoc(doc(db,"orders", id), { status: "rejected" });
+  }
+  async function fulfillOrder(ord: PublicOrderDoc){
+    if (!activeShift?.id) return alert("Buka shift dulu.");
+    const pairs = (ord.items||[])
+      .filter(it => !!it.productId)
+      .map(it => ({ productId: it.productId as string, qty: it.qty }));
+    const shortage = await checkShortageForCart(pairs);
+    if (!shortage.ok) {
+      const msg = shortage.shortages.map(s => `${s.name}: butuh ${s.need}${s.unit}, sisa ${s.have}`).join("\n");
+      return alert("Stok tidak cukup:\n"+msg);
+    }
+    await deductStockForCart(pairs);
+
+    const payMethod: "cash"|"ewallet"|"qris" = ord.method==="qris" ? "qris" : "cash";
+    const sale: Sale = {
+      outlet: OUTLET,
+      shiftId: activeShift.id,
+      cashierEmail: user?.email || "",
+      customerPhone: ord.customerPhone || null,
+      customerName: ord.customerName || null,
+      time: serverTimestamp() as any,
+      items: ord.items.map(i => ({ name: i.name, price: i.price, qty: i.qty, ...(i.note?{note:i.note}:{}) })),
+      subtotal: ord.subtotal,
+      discount: 0,
+      tax: 0,
+      service: ord.shipping, // ongkir dimasukkan ke service
+      total: ord.total,
+      payMethod,
+      cash: payMethod==="cash" ? ord.total : 0,
+      change: 0,
+    };
+    const saleRef = await addDoc(collection(db,"sales"), sale);
+    await updateDoc(doc(db,"orders", ord.id), { status:"done", saleId: saleRef.id });
+    alert("Order diselesaikan & transaksi dibuat ✅");
+  }
+
+  /* ==========================
+     RENDER
+  =========================== */
 
   // LOGIN
   if (!user) {
@@ -572,36 +649,13 @@ export default function App() {
           </div>
           <nav className="flex gap-2">
             {isOwner && (
-              <button
-                onClick={()=>{ setTab("dashboard"); loadDashboard(); }}
-                className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
-                Dashboard
-              </button>
+              <button onClick={()=>{ setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Dashboard</button>
             )}
-            <button
-              onClick={()=>setTab("pos")}
-              className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
-              Kasir
-            </button>
-            <button
-              onClick={()=>{ setTab("history"); loadHistory(false); }}
-              className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
-              Riwayat
-            </button>
-            {isOwner && (
-              <button
-                onClick={()=>setTab("products")}
-                className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
-                Produk
-              </button>
-            )}
-            {isOwner && (
-              <button
-                onClick={()=>setTab("inventory")}
-                className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
-                Inventori
-              </button>
-            )}
+            <button onClick={()=>setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Kasir</button>
+            <button onClick={()=>{ setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Riwayat</button>
+            {isOwner && <button onClick={()=>setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Produk</button>}
+            {isOwner && <button onClick={()=>setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Inventori</button>}
+            <button onClick={()=>setTab("orders")} className={`px-3 py-1.5 rounded-lg border ${tab==="orders"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>Orders</button>
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
@@ -618,21 +672,11 @@ export default function App() {
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {!activeShift?.isOpen ? (
               <>
-                <input
-                  type="number"
-                  className="border rounded-lg px-3 py-2 w-40"
-                  placeholder="Kas awal (Rp)"
-                  value={openCash}
-                  onChange={e=>setOpenCash(Number(e.target.value)||0)}
-                />
-                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>
-                  Buka Shift
-                </button>
+                <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Kas awal (Rp)" value={openCash} onChange={e=>setOpenCash(Number(e.target.value)||0)} />
+                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>Buka Shift</button>
               </>
             ) : (
-              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>
-                Tutup Shift
-              </button>
+              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>Tutup Shift</button>
             )}
           </div>
         </div>
@@ -640,7 +684,6 @@ export default function App() {
         {/* DASHBOARD */}
         {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
-            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -648,29 +691,19 @@ export default function App() {
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
-
-            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
                 <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr>
-                  </thead>
+                  <thead><tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr></thead>
                   <tbody>
-                    {todayStats.topItems.length===0 && (
-                      <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>
-                    )}
+                    {todayStats.topItems.length===0 && <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>}
                     {todayStats.topItems.map((t,i)=>(
-                      <tr key={i} className="border-b">
-                        <td className="py-2">{t.name}</td>
-                        <td className="text-right">{t.qty}</td>
-                      </tr>
+                      <tr key={i} className="border-b"><td className="py-2">{t.name}</td><td className="text-right">{t.qty}</td></tr>
                     ))}
                   </tbody>
                 </table>
               </div>
-
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
@@ -679,9 +712,7 @@ export default function App() {
                     <div key={d.date} className="flex items-center gap-3">
                       <div className="w-24 text-xs text-neutral-600">{d.date}</div>
                       <div className="flex-1 h-2 rounded bg-neutral-100 overflow-hidden">
-                        <div
-                          className="h-2 rounded bg-emerald-500"
-                          style={{width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x=>x.omzet))))) * 100}%`}} />
+                        <div className="h-2 rounded bg-emerald-500" style={{width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x=>x.omzet))))) * 100}%`}} />
                       </div>
                       <div className="w-28 text-right text-xs">{IDR(d.omzet)}</div>
                       <div className="w-10 text-right text-xs">{d.trx}</div>
@@ -699,24 +730,15 @@ export default function App() {
             {/* Products */}
             <div className="md:col-span-7">
               <div className="bg-white rounded-2xl border p-3 mb-2">
-                <input
-                  className="border rounded-lg px-3 py-2 w-full"
-                  placeholder="Cari menu…"
-                  value={queryText}
-                  onChange={e=>setQueryText(e.target.value)}
-                />
+                <input className="border rounded-lg px-3 py-2 w-full" placeholder="Cari menu…" value={queryText} onChange={e=>setQueryText(e.target.value)} />
               </div>
-
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
                 {filteredProducts.map(p=>(
-                  <button
-                    key={p.id}
-                    onClick={()=>setCart(prev=>{
-                      const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
-                      if(same) return prev.map(ci=> ci===same? {...ci, qty:ci.qty+1 } : ci);
-                      return [...prev, { id: uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: noteInput||undefined }];
-                    })}
-                    className="bg-white rounded-2xl border p-3 text-left hover:shadow">
+                  <button key={p.id} onClick={()=>setCart(prev=>{
+                    const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
+                    if(same) return prev.map(ci=> ci===same? {...ci, qty:ci.qty+1 } : ci);
+                    return [...prev, { id: uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: noteInput||undefined }];
+                  })} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
                     <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
                       {p.imageUrl ? <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/> : null}
                     </div>
@@ -727,7 +749,6 @@ export default function App() {
                 ))}
               </div>
             </div>
-
             {/* Cart */}
             <div className="md:col-span-5">
               <div className="bg-white rounded-2xl border p-3">
@@ -745,20 +766,14 @@ export default function App() {
                 )}
                 <div className="mb-2">
                   <label className="inline-flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={useFreeDrink}
-                      onChange={e=>setUseFreeDrink(e.target.checked)}
-                      disabled={!customerPoints || customerPoints<FREE_DRINK_POINTS}/>
+                    <input type="checkbox" checked={useFreeDrink} onChange={e=>setUseFreeDrink(e.target.checked)} disabled={!customerPoints || customerPoints<FREE_DRINK_POINTS}/>
                     Tukar {FREE_DRINK_POINTS} poin untuk 1 minuman gratis
                   </label>
                 </div>
-
                 <div className="flex items-center gap-2 mb-2">
                   <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={noteInput} onChange={e=>setNoteInput(e.target.value)} />
                   <button className="px-3 py-2 rounded-lg border" onClick={()=>setNoteInput("")}>Clear</button>
                 </div>
-
                 {cart.length===0 ? (
                   <div className="text-sm text-neutral-500">Belum ada item. Klik menu untuk menambahkan.</div>
                 ) : (
@@ -782,30 +797,17 @@ export default function App() {
                     ))}
                   </div>
                 )}
-
                 {/* totals */}
                 <div className="my-3 border-t pt-3 space-y-2">
                   <div className="flex items-center justify-between text-sm"><span>Subtotal</span><span className="font-medium">{IDR(subtotal)}</span></div>
                   <div className="grid grid-cols-2 gap-2">
-                    <label className="flex items-center gap-2 text-sm">
-                      <span className="w-20">Pajak %</span>
-                      <input type="number" className="border rounded-lg px-2 py-1 w-24" value={taxPct} onChange={e=>setTaxPct(Number(e.target.value)||0)} />
-                    </label>
-                    <label className="flex items-center gap-2 text-sm">
-                      <span className="w-20">Service %</span>
-                      <input type="number" className="border rounded-lg px-2 py-1 w-24" value={svcPct} onChange={e=>setSvcPct(Number(e.target.value)||0)} />
-                    </label>
+                    <label className="flex items-center gap-2 text-sm"><span className="w-20">Pajak %</span><input type="number" className="border rounded-lg px-2 py-1 w-24" value={taxPct} onChange={e=>setTaxPct(Number(e.target.value)||0)} /></label>
+                    <label className="flex items-center gap-2 text-sm"><span className="w-20">Service %</span><input type="number" className="border rounded-lg px-2 py-1 w-24" value={svcPct} onChange={e=>setSvcPct(Number(e.target.value)||0)} /></label>
                   </div>
-                  <label className="flex items-center justify-between text-sm">
-                    <span>Diskon (Rp)</span>
-                    <input type="number" className="border rounded-lg px-2 py-1 w-28" value={discount} onChange={e=>setDiscount(Number(e.target.value)||0)} />
-                  </label>
-                  {useFreeDrink && <div className="text-xs text-emerald-600">Tukar poin: -{IDR(loyaltyDiscount)}</div>}
-                  <div className="flex items-center justify-between text-lg font-semibold">
-                    <span>Total</span><span>{IDR(total)}</span>
-                  </div>
+                  <label className="flex items-center justify-between text-sm"><span>Diskon (Rp)</span><input type="number" className="border rounded-lg px-2 py-1 w-28" value={discount} onChange={e=>setDiscount(Number(e.target.value)||0)} /></label>
+                  {useFreeDrink && <div className="text-xs text-emerald-600">Tukar poin: -{IDR(Math.min(cheapest, totalBeforeLoyalty))}</div>}
+                  <div className="flex items-center justify-between text-lg font-semibold"><span>Total</span><span>{IDR(total)}</span></div>
                 </div>
-
                 {/* payment */}
                 <div className="grid grid-cols-1 gap-2 mb-2">
                   <select className="border rounded-lg px-3 py-2" value={payMethod} onChange={e=>setPayMethod(e.target.value as any)}>
@@ -815,13 +817,7 @@ export default function App() {
                   </select>
                   {payMethod==="cash" && (
                     <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        className="border rounded-lg px-3 py-2 w-40"
-                        placeholder="Tunai diterima"
-                        value={cash}
-                        onChange={e=>setCash(Number(e.target.value)||0)}
-                      />
+                      <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Tunai diterima" value={cash} onChange={e=>setCash(Number(e.target.value)||0)} />
                       <div className="text-sm">Kembali: <b>{IDR(Math.max(0,(cash||0)-total))}</b></div>
                     </div>
                   )}
@@ -833,25 +829,15 @@ export default function App() {
                     </div>
                   )}
                 </div>
-
                 {/* actions */}
                 <div className="flex justify-between gap-2">
-                  <button
-                    className="px-3 py-2 rounded-lg border"
-                    onClick={()=>{
-                      setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setCash(0);
-                      setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); setUseFreeDrink(false);
-                    }}>
-                    Bersihkan
-                  </button>
+                  <button className="px-3 py-2 rounded-lg border" onClick={()=>{
+                    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setCash(0);
+                    setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); setUseFreeDrink(false);
+                  }}>Bersihkan</button>
                   <div className="flex gap-2">
                     <button className="px-3 py-2 rounded-lg border" disabled={cart.length===0} onClick={printReceipt}>Print Draf</button>
-                    <button
-                      className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
-                      disabled={cart.length===0}
-                      onClick={finalizeSale}>
-                      Selesai & Cetak
-                    </button>
+                    <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50" disabled={cart.length===0} onClick={finalizeSale}>Selesai & Cetak</button>
                   </div>
                 </div>
               </div>
@@ -871,16 +857,7 @@ export default function App() {
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b">
-                    <th className="py-2">Waktu</th>
-                    <th>Kasir</th>
-                    <th>Pelanggan</th>
-                    <th>Item</th>
-                    <th className="text-right">Total</th>
-                    <th>Aksi</th>
-                  </tr>
-                </thead>
+                <thead><tr className="text-left border-b"><th className="py-2">Waktu</th><th>Kasir</th><th>Pelanggan</th><th>Item</th><th className="text-right">Total</th><th>Aksi</th></tr></thead>
                 <tbody>
                   {historyRows.map(s=>(
                     <tr key={s.id} className="border-b hover:bg-emerald-50/40">
@@ -889,9 +866,7 @@ export default function App() {
                       <td>{s.customerPhone || "-"}</td>
                       <td className="truncate">{s.items.map(i=>`${i.name}x${i.qty}`).join(", ")}</td>
                       <td className="text-right font-medium">{IDR(s.total)}</td>
-                      <td className="text-right">
-                        {isOwner && <button className="px-2 py-1 border rounded" onClick={()=> s.id && deleteSale(s.id!)}>Hapus</button>}
-                      </td>
+                      <td className="text-right">{isOwner && <button className="px-2 py-1 border rounded" onClick={()=> s.id && deleteSale(s.id!)}>Hapus</button>}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -902,102 +877,181 @@ export default function App() {
         )}
 
         {/* PRODUCTS */}
-        {tab==="products" && isOwner && (
-          <section className="bg-white rounded-2xl border p-3">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>{
-                setProdForm({ id: undefined, name:"", price:0, imageUrl:"", category:"Signature", active:true });
-                setShowProdModal(true);
-              }}>
-                + Tambah
-              </button>
-            </div>
-            <div className="overflow-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr>
-                </thead>
-                <tbody>
-                  {products.map(p=>(
-                    <tr key={p.id} className="border-b">
-                      <td className="py-2">{p.name}</td>
-                      <td>{p.category||"-"}</td>
-                      <td className="text-right">{IDR(p.price)}</td>
-                      <td className="text-right space-x-2">
-                        <button className="px-2 py-1 border rounded" onClick={()=>{
-                          setProdForm({...p});
-                          setShowProdModal(true);
-                        }}>Edit</button>
-                        <button className="px-2 py-1 border rounded" onClick={()=>{
-                          setRecipeProduct(p);
-                          setRecipeRows(recipes[p.id]||[]);
-                          setShowRecipeModal(true);
-                        }}>Resep</button>
-                        <button className="px-2 py-1 border rounded" onClick={async ()=>{
-                          await updateDoc(doc(db,"products", p.id), { active: !(p.active!==false) });
-                        }}>{p.active!==false?"Nonaktif":"Aktifkan"}</button>
-                        <button className="px-2 py-1 border rounded text-rose-600" onClick={async ()=>{
-                          if(!confirm("Hapus produk ini permanen?")) return;
-                          await deleteDoc(doc(db,"products", p.id));
-                        }}>Hapus</button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
-            </div>
-          </section>
-        )}
+        {tab==="products" && isOwner && <ProductsSection outlet={OUTLET} />}
 
         {/* INVENTORY */}
-        {tab==="inventory" && isOwner && (
+        {tab==="inventory" && isOwner && <InventorySection />}
+
+        {/* ORDERS (admin process) */}
+        {tab==="orders" && (
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
-              <h2 className="text-lg font-semibold">Inventori</h2>
-              <div className="flex gap-2">
-                <button className="px-3 py-2 rounded-lg border" onClick={()=>{
-                  setIngForm({ id: undefined, name:"", unit:"pcs", stock:0, min:0 });
-                  setShowIngModal(true);
-                }}>+ Tambah</button>
-              </div>
+              <h2 className="text-lg font-semibold">Pesanan Online (Pending/Accepted)</h2>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Minimal</th><th className="text-right">Aksi</th></tr>
+                  <tr className="text-left border-b">
+                    <th className="py-2">Waktu</th>
+                    <th>Pelanggan</th>
+                    <th>Alamat</th>
+                    <th>Metode</th>
+                    <th>Item</th>
+                    <th className="text-right">Subtotal</th>
+                    <th className="text-right">Ongkir</th>
+                    <th className="text-right">Total</th>
+                    <th>Status</th>
+                    <th className="text-right">Aksi</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {ingredients.map(i=>(
-                    <tr key={i.id} className={`border-b ${i.min && i.stock<=i.min ? "bg-amber-50" : ""}`}>
-                      <td className="py-2">{i.name}</td>
-                      <td>{i.unit}</td>
-                      <td className="text-right">{i.stock}</td>
-                      <td className="text-right">{i.min||0}</td>
-                      <td className="text-right">
-                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>{
-                          setIngForm({...i});
-                          setShowIngModal(true);
-                        }}>Edit</button>
-                        <button className="px-2 py-1 border rounded text-rose-600" onClick={async ()=>{
-                          if(!confirm("Hapus bahan ini permanen?")) return;
-                          await deleteDoc(doc(db,"ingredients", i.id));
-                        }}>Hapus</button>
+                  {orders.map(o=>(
+                    <tr key={o.id} className="border-b align-top">
+                      <td className="py-2">{o.time ? new Date(o.time.toDate()).toLocaleString("id-ID",{hour12:false}) : "-"}</td>
+                      <td>
+                        <div className="font-medium">{o.customerName}</div>
+                        <div className="text-xs text-neutral-500">{o.customerPhone}</div>
+                      </td>
+                      <td className="max-w-[240px] pr-2">
+                        <div className="text-xs">{o.address}</div>
+                        <div className="text-[11px] text-neutral-500">Jarak ~ {o.distance} km</div>
+                      </td>
+                      <td className="uppercase">{o.method}</td>
+                      <td className="max-w-[260px]"><div className="text-xs truncate">{o.items.map(i=>`${i.name}x${i.qty}`).join(", ")}</div></td>
+                      <td className="text-right">{IDR(o.subtotal)}</td>
+                      <td className="text-right">{IDR(o.shipping)}</td>
+                      <td className="text-right font-semibold">{IDR(o.total)}</td>
+                      <td>{o.status}</td>
+                      <td className="text-right space-x-2">
+                        {o.status==="pending" && (
+                          <>
+                            <button className="px-2 py-1 border rounded" onClick={()=>acceptOrder(o.id)}>Accept</button>
+                            <button className="px-2 py-1 border rounded text-rose-600" onClick={()=>rejectOrder(o.id)}>Reject</button>
+                          </>
+                        )}
+                        {o.status!=="done" && (
+                          <button className="px-2 py-1 border rounded bg-emerald-600 text-white" onClick={()=>fulfillOrder(o)}>
+                            Selesaikan & Buat Transaksi
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {ingredients.length===0 && (
-                <div className="text-sm text-neutral-500">Belum ada data inventori.</div>
-              )}
+              {orders.length===0 && <div className="text-sm text-neutral-500">Belum ada order pending/accepted.</div>}
             </div>
           </section>
         )}
       </main>
 
-      {/* === MODALS === */}
+      {/* Modal QR */}
+      {showQR && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={()=>setShowQR(false)}>
+          <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
+            <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
+            <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ==========================
+   Subcomponents: Products & Inventory (dengan modal inline)
+========================== */
+function ProductsSection({ outlet }: { outlet: string }) {
+  const [products, setProducts] = useState<Product[]>([]);
+  const [showProdModal, setShowProdModal] = useState(false);
+  const [prodForm, setProdForm] = useState<Partial<Product>>({ name:"", price:0, imageUrl:"", category:"Signature", active:true });
+  const [recipes, setRecipes] = useState<Record<string, RecipeItem[]>>({});
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [showRecipeModal, setShowRecipeModal] = useState(false);
+  const [recipeProduct, setRecipeProduct] = useState<Product | null>(null);
+  const [recipeRows, setRecipeRows] = useState<RecipeItem[]>([]);
+
+  useEffect(()=>{
+    const qProd = query(collection(db,"products"), where("outlet","==",outlet));
+    const unsub1 = onSnapshot(qProd, s=>{
+      const rows: Product[] = s.docs.map(d=>{ const x=d.data() as any; return { id:d.id, name:x.name, price:x.price, imageUrl:x.imageUrl, category:x.category, active:x.active, outlet:x.outlet }; });
+      setProducts(rows);
+    });
+    const unsub2 = onSnapshot(collection(db,"recipes"), s=>{
+      const map: Record<string, RecipeItem[]> = {};
+      s.docs.forEach(d=>{ const x=d.data() as any; map[d.id] = Array.isArray(x.items)? x.items : []; });
+      setRecipes(map);
+    });
+    const qIng = query(collection(db,"ingredients"), where("outlet","==",outlet));
+    const unsub3 = onSnapshot(qIng, s=>{
+      const rows: Ingredient[] = s.docs.map(d=>{ const x=d.data() as any; return { id:d.id, name:x.name, unit:x.unit, stock:x.stock??0, min:x.min??0, outlet:x.outlet }; });
+      setIngredients(rows);
+    });
+    return ()=>{unsub1();unsub2();unsub3();};
+  },[outlet]);
+
+  async function saveProduct(){
+    if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
+    const id = prodForm.id || uid();
+    await setDoc(doc(db,"products",id), {
+      outlet,
+      name: prodForm.name,
+      price: Number(prodForm.price||0),
+      imageUrl: prodForm.imageUrl || "",
+      category: prodForm.category || "Signature",
+      active: prodForm.active!==false
+    }, { merge:true });
+    setShowProdModal(false);
+  }
+  async function toggleProductActive(p: Product){
+    await updateDoc(doc(db,"products", p.id), { active: !(p.active!==false) });
+  }
+  async function deleteProductHard(p: Product){
+    if(!confirm("Hapus produk ini permanen?")) return;
+    await deleteDoc(doc(db,"products", p.id));
+  }
+  function openRecipe(p: Product){
+    setRecipeProduct(p);
+    const items = recipes[p.id] || [];
+    setRecipeRows(items.length ? items.map(r => ({...r})) : []);
+    setShowRecipeModal(true);
+  }
+  async function saveRecipe(){
+    if(!recipeProduct) return;
+    const clean = recipeRows.filter(r => r.ingredientId && r.qty>0);
+    await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
+    setShowRecipeModal(false);
+  }
+
+  return (
+    <section className="bg-white rounded-2xl border p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-lg font-semibold">Manajemen Produk</h2>
+        <button className="px-3 py-2 rounded-lg border" onClick={()=>{ setShowProdModal(true); setProdForm({ id: undefined, name:"", price:0, imageUrl:"", category:"Signature", active:true }); }}>
+          + Tambah
+        </button>
+      </div>
+      <div className="overflow-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr></thead>
+          <tbody>
+            {products.map(p=>(
+              <tr key={p.id} className="border-b">
+                <td className="py-2">{p.name}</td>
+                <td>{p.category||"-"}</td>
+                <td className="text-right">{IDR(p.price)}</td>
+                <td className="text-right space-x-2">
+                  <button className="px-2 py-1 border rounded" onClick={()=>{ setProdForm({...p}); setShowProdModal(true); }}>Edit</button>
+                  <button className="px-2 py-1 border rounded" onClick={()=>openRecipe(p)}>Resep</button>
+                  <button className="px-2 py-1 border rounded" onClick={()=>toggleProductActive(p)}>{p.active!==false?"Nonaktif":"Aktifkan"}</button>
+                  <button className="px-2 py-1 border rounded text-rose-600" onClick={()=>deleteProductHard(p)}>Hapus</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
+      </div>
 
       {/* Product Modal */}
       {showProdModal && (
@@ -1016,59 +1070,7 @@ export default function App() {
             </div>
             <div className="mt-3 flex justify-end gap-2">
               <button className="px-3 py-2 border rounded" onClick={()=>setShowProdModal(false)}>Batal</button>
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded"
-                onClick={async ()=>{
-                  if(!isOwner) return alert("Hanya owner.");
-                  if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
-                  const id = prodForm.id || uid();
-                  await setDoc(doc(db,"products",id), {
-                    outlet: OUTLET,
-                    name: prodForm.name,
-                    price: Number(prodForm.price||0),
-                    imageUrl: prodForm.imageUrl || "",
-                    category: prodForm.category || "Signature",
-                    active: prodForm.active!==false
-                  }, { merge:true });
-                  setShowProdModal(false);
-                }}>
-                Simpan
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Ingredient Modal */}
-      {showIngModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowIngModal(false)}>
-          <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
-            <h3 className="font-semibold mb-2">{ingForm.id?"Edit Bahan":"Tambah Bahan"}</h3>
-            <div className="space-y-2">
-              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama bahan" value={safeVal(ingForm.name)} onChange={e=>setIngForm({...ingForm, name:e.target.value})}/>
-              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Satuan (ml, gr, pcs...)" value={safeVal(ingForm.unit,"pcs")} onChange={e=>setIngForm({...ingForm, unit:e.target.value})}/>
-              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Stok" value={Number(ingForm.stock||0)} onChange={e=>setIngForm({...ingForm, stock:Number(e.target.value)||0})}/>
-              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Minimal stok (peringatan)" value={Number(ingForm.min||0)} onChange={e=>setIngForm({...ingForm, min:Number(e.target.value)||0})}/>
-            </div>
-            <div className="mt-3 flex justify-end gap-2">
-              <button className="px-3 py-2 border rounded" onClick={()=>setShowIngModal(false)}>Batal</button>
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded"
-                onClick={async ()=>{
-                  if(!isOwner) return alert("Hanya owner.");
-                  if(!ingForm.name) return alert("Nama bahan wajib diisi.");
-                  const id = ingForm.id || uid();
-                  await setDoc(doc(db,"ingredients",id), {
-                    outlet: OUTLET,
-                    name: ingForm.name,
-                    unit: ingForm.unit||"pcs",
-                    stock: Number(ingForm.stock||0),
-                    min: Number(ingForm.min||0)
-                  }, { merge:true });
-                  setShowIngModal(false);
-                }}>
-                Simpan
-              </button>
+              <button className="px-3 py-2 bg-emerald-600 text-white rounded" onClick={saveProduct}>Simpan</button>
             </div>
           </div>
         </div>
@@ -1082,19 +1084,10 @@ export default function App() {
             <div className="space-y-2">
               {recipeRows.map((r,idx)=>(
                 <div key={idx} className="grid grid-cols-6 gap-2">
-                  <select
-                    className="col-span-4 border rounded-lg px-2 py-2"
-                    value={r.ingredientId}
-                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}
-                  >
+                  <select className="col-span-4 border rounded-lg px-2 py-2" value={r.ingredientId} onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}>
                     {ingredients.map(ing=><option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
                   </select>
-                  <input
-                    type="number"
-                    className="col-span-1 border rounded-lg px-2 py-2"
-                    value={r.qty}
-                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}
-                  />
+                  <input type="number" className="col-span-1 border rounded-lg px-2 py-2" value={r.qty} onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}/>
                   <button className="col-span-1 border rounded" onClick={()=>setRecipeRows(prev=>prev.filter((_,i)=>i!==idx))}>x</button>
                 </div>
               ))}
@@ -1102,82 +1095,140 @@ export default function App() {
             </div>
             <div className="mt-3 flex justify-end gap-2">
               <button className="px-3 py-2 border rounded" onClick={()=>setShowRecipeModal(false)}>Batal</button>
-              <button
-                className="px-3 py-2 bg-emerald-600 text-white rounded"
-                onClick={async ()=>{
-                  if(!isOwner) return alert("Hanya owner.");
-                  const clean = recipeRows.filter(rr => rr.ingredientId && rr.qty>0);
-                  await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
-                  setShowRecipeModal(false);
-                }}>
-                Simpan Resep
-              </button>
+              <button className="px-3 py-2 bg-emerald-600 text-white rounded" onClick={saveRecipe}>Simpan Resep</button>
             </div>
           </div>
         </div>
       )}
+    </section>
+  );
+}
 
-      {/* Modal QR */}
-      {showQR && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={()=>setShowQR(false)}>
-          <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
-            <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
-            <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
+function InventorySection() {
+  const [ingredients, setIngredients] = useState<Ingredient[]>([]);
+  const [showIngModal, setShowIngModal] = useState(false);
+  const [ingForm, setIngForm] = useState<Partial<Ingredient>>({ name:"", unit:"pcs", stock:0, min:0 });
+
+  useEffect(()=>{
+    const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
+    const unsub = onSnapshot(qIng, s=>{
+      const rows: Ingredient[] = s.docs.map(d=>{ const x=d.data() as any; return { id:d.id, name:x.name, unit:x.unit, stock:x.stock??0, min:x.min??0, outlet:x.outlet }; });
+      setIngredients(rows);
+    });
+    return ()=>unsub();
+  },[]);
+
+  async function saveIngredient(){
+    if(!ingForm.name) return alert("Nama bahan wajib diisi.");
+    const id = ingForm.id || uid();
+    await setDoc(doc(db,"ingredients",id), {
+      outlet: OUTLET,
+      name: ingForm.name,
+      unit: ingForm.unit||"pcs",
+      stock: Number(ingForm.stock||0),
+      min: Number(ingForm.min||0)
+    }, { merge:true });
+    setShowIngModal(false);
+  }
+  async function deleteIngredientHard(i: Ingredient){
+    if(!confirm("Hapus bahan ini permanen?")) return;
+    await deleteDoc(doc(db,"ingredients", i.id));
+  }
+
+  return (
+    <section className="bg-white rounded-2xl border p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-lg font-semibold">Inventori</h2>
+        <div className="flex gap-2">
+          <button className="px-3 py-2 rounded-lg border" onClick={()=>{
+            setIngForm({ id: undefined, name:"", unit:"pcs", stock:0, min:0 });
+            setShowIngModal(true);
+          }}>+ Tambah</button>
+        </div>
+      </div>
+      <div className="overflow-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Minimal</th><th className="text-right">Aksi</th></tr></thead>
+        <tbody>
+          {ingredients.map(i=>(
+            <tr key={i.id} className={`border-b ${i.min && i.stock<=i.min ? "bg-amber-50" : ""}`}>
+              <td className="py-2">{i.name}</td>
+              <td>{i.unit}</td>
+              <td className="text-right">{i.stock}</td>
+              <td className="text-right">{i.min||0}</td>
+              <td className="text-right">
+                <button className="px-2 py-1 border rounded mr-2" onClick={()=>{ setIngForm({...i}); setShowIngModal(true); }}>Edit</button>
+                <button className="px-2 py-1 border rounded text-rose-600" onClick={()=>deleteIngredientHard(i)}>Hapus</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        </table>
+        {ingredients.length===0 && <div className="text-sm text-neutral-500">Belum ada data inventori.</div>}
+      </div>
+
+      {/* Ingredient Modal */}
+      {showIngModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowIngModal(false)}>
+          <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-2">{ingForm.id?"Edit Bahan":"Tambah Bahan"}</h3>
+            <div className="space-y-2">
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama bahan" value={safe(ingForm.name)} onChange={e=>setIngForm({...ingForm, name:e.target.value})}/>
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Satuan (ml, gr, pcs...)" value={safe(ingForm.unit,"pcs")} onChange={e=>setIngForm({...ingForm, unit:e.target.value})}/>
+              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Stok" value={Number(ingForm.stock||0)} onChange={e=>setIngForm({...ingForm, stock:Number(e.target.value)||0})}/>
+              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Minimal stok (peringatan)" value={Number(ingForm.min||0)} onChange={e=>setIngForm({...ingForm, min:Number(e.target.value)||0})}/>
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button className="px-3 py-2 border rounded" onClick={()=>setShowIngModal(false)}>Batal</button>
+              <button className="px-3 py-2 bg-emerald-600 text-white rounded" onClick={saveIngredient}>Simpan</button>
+            </div>
           </div>
         </div>
       )}
-    </div>
+    </section>
   );
 }
 
-/* Small helpers */
-function safeVal<T extends string | number | undefined>(v: T, fallback: any = "") {
-  return (v===undefined || v===null) ? fallback : v;
-}
-function KPI({title, value}:{title:string; value:string}) {
-  return (
-    <div className="bg-white border rounded-2xl p-4">
-      <div className="text-[12px] text-neutral-500">{title}</div>
-      <div className="text-xl font-bold mt-1">{value}</div>
-    </div>
-  );
-}
-
-/* ===========================================================
-   PUBLIC ORDER PAGE (tanpa login) — path: /order?outlet=...
-   =========================================================== */
+/* ==========================
+   PUBLIK ORDER (tanpa login)
+   path: /order?outlet=XXXXX
+========================== */
 function PublicOrder(){
-  const outlet = getQueryParam("outlet") || OUTLET;
-  const [loading, setLoading] = useState(true);
+  const outlet = param("outlet", OUTLET);
   const [menu, setMenu] = useState<Product[]>([]);
+  const [loading, setLoading] = useState(true);
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [note, setNote] = useState("");
+
+  // customer
   const [custName, setCustName] = useState("");
   const [custPhone, setCustPhone] = useState("");
   const [custAddr, setCustAddr] = useState("");
-  const [distance, setDistance] = useState<number>(1);
+  const [distanceKm, setDistanceKm] = useState<number>(1);
   const [method, setMethod] = useState<"qris"|"cod">("qris");
   const [sending, setSending] = useState(false);
-  const [note, setNote] = useState("");
-
-  const subtotal = useMemo(()=>cart.reduce((s,i)=>s+i.price*i.qty,0),[cart]);
-  const shipping = useMemo(()=>calcShipping(distance),[distance]);
-  const total = subtotal+shipping;
+  const [showQR, setShowQR] = useState(false);
 
   useEffect(()=>{
     (async()=>{
       const q = query(collection(db,"products"), where("outlet","==",outlet), where("active","==",true));
       const snap = await getDocs(q);
-      const rows: Product[] = snap.docs.map(d=>({ id:d.id, ...(d.data() as any)}));
+      const rows: Product[] = snap.docs.map(d=>({ id: d.id, ...(d.data() as any) }));
       setMenu(rows);
       setLoading(false);
     })();
   },[outlet]);
 
-  function addToCart(p:Product){
+  const filtered = useMemo(()=>menu, [menu]);
+  const subtotal = useMemo(()=> cart.reduce((s,i)=>s+i.price*i.qty,0), [cart]);
+  const shipping = useMemo(()=> calcShipping(distanceKm), [distanceKm]);
+  const total = Math.max(0, subtotal + shipping);
+
+  function addToCart(p: Product){
     setCart(prev=>{
-      const same = prev.find(ci=>ci.productId===p.id && (ci.note||"") === (note||""));
-      if(same) return prev.map(ci=>ci===same? {...ci, qty:ci.qty+1} : ci);
-      return [...prev, { id:uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: note||undefined }];
+      const same = prev.find(ci=> ci.productId===p.id && (ci.note||"") === (note||""));
+      if(same) return prev.map(ci=> ci===same ? {...ci, qty:ci.qty+1} : ci);
+      return [...prev, { id: uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: note||undefined }];
     });
   }
   const inc = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:ci.qty+1 } : ci));
@@ -1187,123 +1238,170 @@ function PublicOrder(){
   async function submitOrder(){
     if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
     if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
-    setSending(true);
-    const data = {
-      outlet,
-      source:"public",
-      customerName:custName,
-      customerPhone:custPhone,
-      address:custAddr,
-      distance,
-      method,
-      time: serverTimestamp(),
-      items: cart.map(c=>({name:c.name,price:c.price,qty:c.qty, ...(c.note?{note:c.note}:{})})),
-      subtotal, shipping, total, status:"pending"
-    };
-    await addDoc(collection(db,"orders"), data);
-    setSending(false);
-    alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
-    setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistance(1); setNote("");
+    try{
+      setSending(true);
+      await addDoc(collection(db,"orders"), {
+        outlet,
+        source:"public",
+        customerName:custName,
+        customerPhone:custPhone,
+        address:custAddr,
+        distance: Number(distanceKm)||1,
+        method,
+        time: serverTimestamp(),
+        items: cart.map(c=>({ productId: c.productId, name:c.name, price:c.price, qty:c.qty, ...(c.note?{note:c.note}:{}) })),
+        subtotal, shipping, total,
+        status:"pending"
+      });
+      if(method==="qris") setShowQR(true);
+      setCart([]); setNote("");
+      setCustName(""); setCustPhone(""); setCustAddr(""); setDistanceKm(1);
+      alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
+    }catch(e:any){
+      alert("Gagal mengirim pesanan: "+(e?.message||e));
+    }finally{
+      setSending(false);
+    }
   }
 
   if(loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white p-4">
-      <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow p-4">
-        <div className="flex items-center gap-3 mb-3">
-          <img src={BRAND_LOGO} className="h-8 w-8 rounded-xl object-cover" />
-          <div className="font-bold">NamiPOS — Order Antar</div>
-          <div className="text-xs text-neutral-500">Outlet: {outlet}</div>
-          <a className="ml-auto text-sm underline" href="/">Ke Mode Kasir</a>
-        </div>
+      <div className="max-w-5xl mx-auto">
+        {/* Header */}
+        <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border rounded-2xl px-4 py-3 mb-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img src={BRAND_LOGO} alt="Logo" className="h-8 w-8 rounded-xl object-cover"/>
+            <div>
+              <div className="font-bold">NamiPOS — Order Antar</div>
+              <div className="text-[11px] text-neutral-500">{outlet}</div>
+            </div>
+          </div>
+          <a className="text-sm underline" href={window.location.pathname.replace("/order","/")}>Ke Mode Kasir</a>
+        </header>
 
-        {/* Data pelanggan */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
-          <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={e=>setCustName(e.target.value)} />
-          <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={e=>setCustPhone(e.target.value)} />
-        </div>
-        <textarea className="border rounded-lg px-3 py-2 w-full mb-2" rows={2} placeholder="Alamat pengantaran" value={custAddr} onChange={e=>setCustAddr(e.target.value)} />
-        <label className="flex items-center gap-2 mb-4 text-sm">
-          <span>Jarak (km)</span>
-          <input type="number" className="border rounded-lg px-2 py-1 w-20" value={distance} min={1} onChange={e=>setDistance(Number(e.target.value)||1)} />
-          <span className="text-neutral-500 text-xs">1 km pertama gratis • Ongkir {IDR(calcShipping(distance))}</span>
-        </label>
-
-        {/* Catatan item */}
-        <div className="flex items-center gap-2 mb-2">
-          <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={note} onChange={e=>setNote(e.target.value)} />
-          <button className="px-3 py-2 rounded-lg border" onClick={()=>setNote("")}>Clear</button>
-        </div>
-
-        {/* Menu list */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-          {menu.map(p=>(
-            <button
-              key={p.id}
-              onClick={()=>addToCart(p)}
-              className="bg-white border rounded-2xl p-3 text-left hover:shadow">
-              <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
-                {p.imageUrl && <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/>}
-              </div>
-              <div className="font-medium leading-tight">{p.name}</div>
-              <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
-              <div className="font-semibold mt-1">{IDR(p.price)}</div>
-            </button>
-          ))}
-        </div>
-
-        {/* Cart */}
-        <div className="bg-neutral-50 border rounded-2xl p-3 mb-4">
-          {cart.length===0 ? (
-            <div className="text-sm text-neutral-500">Belum ada item dipilih.</div>
-          ):(
-            <div className="space-y-2">
-              {cart.map(ci=>(
-                <div key={ci.id} className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2">
-                  <div className="col-span-6">
-                    <div className="font-medium leading-tight">{ci.name}</div>
-                    {ci.note && <div className="text-xs text-neutral-500">{ci.note}</div>}
+        {/* Body */}
+        <main className="grid grid-cols-1 md:grid-cols-12 gap-4">
+          {/* Produk */}
+          <section className="md:col-span-7">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-3">
+              {filtered.map(p=>(
+                <button key={p.id} onClick={()=>addToCart(p)} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
+                  <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
+                    {p.imageUrl ? <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/> : null}
                   </div>
-                  <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
-                  <div className="col-span-3 flex items-center justify-end gap-2">
-                    <button className="px-2 py-1 border rounded" onClick={()=>dec(ci.id)}>-</button>
-                    <div className="w-8 text-center font-medium">{ci.qty}</div>
-                    <button className="px-2 py-1 border rounded" onClick={()=>inc(ci.id)}>+</button>
-                  </div>
-                  <div className="col-span-1 text-right">
-                    <button className="px-2 py-1 rounded border" onClick={()=>rm(ci.id)}>x</button>
-                  </div>
-                </div>
+                  <div className="font-medium leading-tight">{p.name}</div>
+                  <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
+                  <div className="font-semibold mt-1">{IDR(p.price)}</div>
+                </button>
               ))}
             </div>
-          )}
-          {cart.length>0 && (
-            <div className="mt-3 space-y-1 text-sm">
-              <div className="flex justify-between"><span>Subtotal</span><span>{IDR(subtotal)}</span></div>
-              <div className="flex justify-between"><span>Ongkir</span><span>{IDR(shipping)}</span></div>
-              <div className="flex justify-between font-semibold"><span>Total</span><span>{IDR(total)}</span></div>
+          </section>
+
+          {/* Checkout */}
+          <section className="md:col-span-5">
+            <div className="bg-white rounded-2xl border p-3">
+              {/* Customer form */}
+              <div className="grid grid-cols-1 gap-2 mb-3">
+                <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={e=>setCustName(e.target.value)} />
+                <input className="border rounded-lg px-3 py-2" placeholder="Nomor HP (WhatsApp)" value={custPhone} onChange={e=>setCustPhone(e.target.value)} />
+                <textarea className="border rounded-lg px-3 py-2 min-h-[80px]" placeholder="Alamat lengkap" value={custAddr} onChange={e=>setCustAddr(e.target.value)} />
+                <label className="flex items-center gap-2 text-sm">
+                  <span>Jarak (km)</span>
+                  <input type="number" className="border rounded-lg px-2 py-1 w-24" min={1} value={distanceKm} onChange={e=>setDistanceKm(Number(e.target.value)||1)} />
+                  <span className="text-neutral-500">1 km pertama gratis, lanjut Rp2.000/km</span>
+                </label>
+              </div>
+              <div className="flex items-center gap-2 mb-2">
+                <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={note} onChange={e=>setNote(e.target.value)} />
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>setNote("")}>Clear</button>
+              </div>
+
+              {cart.length===0 ? (
+                <div className="text-sm text-neutral-500">Keranjang kosong.</div>
+              ) : (
+                <div className="space-y-2">
+                  {cart.map(ci=>(
+                    <div key={ci.id} className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2">
+                      <div className="col-span-6">
+                        <div className="font-medium leading-tight">{ci.name}</div>
+                        {ci.note && <div className="text-xs text-neutral-500">{ci.note}</div>}
+                      </div>
+                      <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
+                      <div className="col-span-3 flex items-center justify-end gap-2">
+                        <button className="px-2 py-1 border rounded" onClick={()=>dec(ci.id)}>-</button>
+                        <div className="w-8 text-center font-medium">{ci.qty}</div>
+                        <button className="px-2 py-1 border rounded" onClick={()=>inc(ci.id)}>+</button>
+                      </div>
+                      <div className="col-span-1 text-right">
+                        <button className="px-2 py-1 rounded border" onClick={()=>rm(ci.id)}>x</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* totals */}
+              <div className="my-3 border-t pt-3 space-y-2">
+                <div className="flex items-center justify-between text-sm"><span>Subtotal</span><span className="font-medium">{IDR(subtotal)}</span></div>
+                <div className="flex items-center justify-between text-sm"><span>Ongkir</span><span className="font-medium">{IDR(shipping)}</span></div>
+                <div className="flex items-center justify-between text-lg font-semibold"><span>Total</span><span>{IDR(total)}</span></div>
+              </div>
+
+              {/* payment */}
+              <div className="grid grid-cols-1 gap-2 mb-2">
+                <label className="text-sm">Metode bayar</label>
+                <select className="border rounded-lg px-3 py-2" value={method} onChange={e=>setMethod(e.target.value as any)}>
+                  <option value="qris">QRIS (online)</option>
+                  <option value="cod">COD (cash di tempat)</option>
+                </select>
+                {method==="qris" && (
+                  <div className="border rounded-xl p-2 bg-emerald-50">
+                    <div className="text-sm mb-1">Scan untuk bayar:</div>
+                    <img src={QRIS_IMG_SRC} alt="QRIS" className="w-40" onClick={()=>setShowQR(true)} />
+                    <div className="text-xs text-neutral-500 mt-1">* Setelah sukses, tekan “Kirim Pesanan”.</div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex justify-between gap-2">
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>setCart([])}>Bersihkan</button>
+                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
+                        disabled={sending || cart.length===0 || !custName || !custPhone || !custAddr}
+                        onClick={submitOrder}>
+                  {sending? "Mengirim..." : "Kirim Pesanan"}
+                </button>
+              </div>
             </div>
-          )}
-        </div>
-
-        {/* Metode bayar */}
-        <div className="mb-4">
-          <label className="block mb-1 text-sm font-medium">Metode pembayaran</label>
-          <select className="border rounded-lg px-3 py-2" value={method} onChange={e=>setMethod(e.target.value as any)}>
-            <option value="qris">QRIS (online)</option>
-            <option value="cod">Bayar di Tempat (COD)</option>
-          </select>
-          {method==="qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
-        </div>
-
-        <button
-          disabled={sending || cart.length===0 || !custName || !custPhone || !custAddr}
-          className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
-          onClick={submitOrder}>
-          {sending?"Mengirim...":"Kirim Pesanan"}
-        </button>
+          </section>
+        </main>
       </div>
+
+      {/* Modal QR */}
+      {showQR && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={()=>setShowQR(false)}>
+          <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
+            <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
+            <div className="text-center mt-2 text-sm">Total: {IDR(total)}</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ==========================
+   Helpers kecil
+========================== */
+function safe<T extends string | number | undefined>(v: T, fallback: any = "") {
+  return (v===undefined || v===null) ? fallback : v;
+}
+function KPI({title, value}:{title:string; value:string}) {
+  return (
+    <div className="bg-white border rounded-2xl p-4">
+      <div className="text-[12px] text-neutral-500">{title}</div>
+      <div className="text-xl font-bold mt-1">{value}</div>
     </div>
   );
 }
