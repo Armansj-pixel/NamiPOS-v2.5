@@ -127,187 +127,183 @@ async function deductStockForCart(cartPairs: { productId: string; qty: number }[
   }
 }
 
-/* =================================
-   PUBLIC ORDER (tanpa login) — <PublicOrder/>
-================================== */
+ // === PUBLIC ORDER (no-login) ===
 function PublicOrder() {
+  // ambil outlet dari query (?outlet=...), default ke konstanta OUTLET
+  const outlet = param("outlet", OUTLET);
+
+  // state
+  const [loading, setLoading] = useState(true);
   const [menu, setMenu] = useState<Product[]>([]);
-  const [queryTxt, setQueryTxt] = useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
-  const [note, setNote] = useState("");
   const [custName, setCustName] = useState("");
   const [custPhone, setCustPhone] = useState("");
   const [custAddr, setCustAddr] = useState("");
-  const [distanceKm, setDistanceKm] = useState<number>(1);
-  const [method, setMethod] = useState<"qris"|"cod">("qris");
+  const [distanceKm, setDistanceKm] = useState<number>(1); // default 1 km
+  const [method, setMethod] = useState<"qris" | "cod">("qris");
   const [sending, setSending] = useState(false);
-  const filtered = useMemo(()=> menu.filter(p=> (p.active!==false) && p.name.toLowerCase().includes(queryTxt.toLowerCase())), [menu, queryTxt]);
-  const subtotal = useMemo(()=> cart.reduce((s,i)=>s+i.price*i.qty,0), [cart]);
-  const shipping = calcShipping(distanceKm);
-  const total = Math.max(0, subtotal + shipping);
 
-  useEffect(()=>{
-    // load produk aktif untuk OUTLET
-    const qProd = query(collection(db,"products"), where("outlet","==",OUTLET), where("active","==",true));
-    const unsub = onSnapshot(qProd, snap=>{
-      const rows: Product[] = snap.docs.map(d=> {
-        const x = d.data() as any;
-        return { id: d.id, name: x.name, price: x.price, imageUrl: x.imageUrl||"", category: x.category||"Signature", active: true, outlet: OUTLET };
-      });
+  const subtotal = useMemo(() => cart.reduce((s, i) => s + i.price * i.qty, 0), [cart]);
+  const shipping = useMemo(() => calcShipping(distanceKm), [distanceKm]);
+  const total = subtotal + shipping;
+
+  // load produk aktif
+  useEffect(() => {
+    (async () => {
+      const q = query(collection(db, "products"), where("outlet", "==", outlet), where("active", "==", true));
+      const snap = await getDocs(q);
+      const rows: Product[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
       setMenu(rows);
-    });
-    return ()=>unsub();
-  },[]);
+      setLoading(false);
+    })();
+  }, [outlet]);
 
-  function addToCart(p: Product){
-    setCart(prev=>{
-      const same = prev.find(ci=> ci.productId===p.id && (ci.note||"") === (note||""));
-      if(same) return prev.map(ci=> ci===same ? {...ci, qty:ci.qty+1} : ci);
-      return [...prev, { id:uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: note||undefined }];
+  function addToCart(p: Product) {
+    setCart((prev) => {
+      const same = prev.find((ci) => ci.productId === p.id);
+      if (same) return prev.map((ci) => (ci.productId === p.id ? { ...ci, qty: ci.qty + 1 } : ci));
+      return [...prev, { id: uid(), productId: p.id, name: p.name, price: p.price, qty: 1 }];
     });
   }
-  const inc = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:ci.qty+1 } : ci));
-  const dec = (id:string)=> setCart(prev=> prev.map(ci=> ci.id===id? {...ci, qty:Math.max(1,ci.qty-1)} : ci));
-  const rm  = (id:string)=> setCart(prev=> prev.filter(ci=> ci.id!==id));
 
-  async function submitOrder(){
-  if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
-  if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
+  async function submitOrder() {
+    if (cart.length === 0) return alert("Pilih menu terlebih dahulu.");
+    if (!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
 
-  setSending(true);
-  try{
-    await addDoc(collection(db,"orders"), {
-      outlet,                     // pastikan ini sama dengan konstanta OUTLET di atas (mis. "MTHaryono")
-      source: "public",
-      customerName: custName,
-      customerPhone: custPhone,
-      address: custAddr,
-      distance,
-      method,
-      time: serverTimestamp(),    // WAJIB pakai "time" (admin baca pakai ini)
-      items: cart.map(c=>({ name:c.name, price:c.price, qty:c.qty })),
-      subtotal,
-      shipping: calcShipping(distance),
-      total: subtotal + calcShipping(distance),
-      status: "pending"
-    });
-    alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
-    setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistance(1);
-  }catch(e:any){
-    alert("Gagal mengirim pesanan: "+(e?.message||e));
-  }finally{
-    setSending(false);
+    setSending(true);
+    try {
+      await addDoc(collection(db, "orders"), {
+        outlet,                      // <- gunakan outlet dari query/konstanta
+        source: "public",
+        customerName: custName,
+        customerPhone: custPhone,
+        address: custAddr,
+        distance: distanceKm,        // <- konsisten pakai distanceKm
+        method,
+        time: serverTimestamp(),     // <- Wajib: admin pakai orderBy("time","desc")
+        items: cart.map((c) => ({ name: c.name, price: c.price, qty: c.qty })),
+        subtotal,
+        shipping,
+        total,
+        status: "pending",
+      });
+
+      alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
+      setCart([]);
+      setCustName("");
+      setCustPhone("");
+      setCustAddr("");
+      setDistanceKm(1);
+    } catch (e: any) {
+      alert("Gagal mengirim pesanan: " + (e?.message || e));
+    } finally {
+      setSending(false);
+    }
   }
-}
+
+  if (loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
 
   return (
-    <div className="min-h-screen bg-neutral-50">
-      <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b">
-        <div className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src={BRAND_LOGO} alt="Logo" className="h-8 w-8 rounded-xl object-cover"/>
-            <div>
-              <div className="font-bold">NamiPOS — Order Antar</div>
-              <div className="text-[11px] text-neutral-500">{OUTLET}</div>
-            </div>
-          </div>
-          <a className="text-sm underline" href={window.location.pathname.replace("/order","/")}>Ke Mode Kasir</a>
-        </div>
-      </header>
+    <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white p-4">
+      <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow p-4">
+        <h1 className="text-2xl font-bold mb-3 text-center">Pesan Online — {outlet}</h1>
 
-      <main className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-4 grid grid-cols-1 md:grid-cols-12 gap-4">
-        {/* Produk */}
-        <section className="md:col-span-7">
-          <div className="bg-white rounded-2xl border p-3 mb-2">
-            <input className="border rounded-lg px-3 py-2 w-full" placeholder="Cari menu…" value={queryTxt} onChange={e=>setQueryTxt(e.target.value)} />
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-3">
-            {filtered.map(p=>(
-              <button key={p.id} onClick={()=>addToCart(p)} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
-                <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
-                  {p.imageUrl ? <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/> : null}
-                </div>
-                <div className="font-medium leading-tight">{p.name}</div>
-                <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
-                <div className="font-semibold mt-1">{IDR(p.price)}</div>
-              </button>
-            ))}
-          </div>
-        </section>
-        {/* Checkout */}
-        <section className="md:col-span-5">
-          <div className="bg-white rounded-2xl border p-3">
-            <div className="grid grid-cols-1 gap-2 mb-3">
-              <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={e=>setCustName(e.target.value)} />
-              <input className="border rounded-lg px-3 py-2" placeholder="Nomor HP (WhatsApp)" value={custPhone} onChange={e=>setCustPhone(e.target.value)} />
-              <textarea className="border rounded-lg px-3 py-2 min-h-[80px]" placeholder="Alamat lengkap" value={custAddr} onChange={e=>setCustAddr(e.target.value)} />
-              <label className="flex items-center gap-2 text-sm">
-                <span>Jarak (km)</span>
-                <input type="number" className="border rounded-lg px-2 py-1 w-24" min={1} value={distanceKm} onChange={e=>setDistanceKm(Number(e.target.value)||1)} />
-                <span className="text-neutral-500">1 km pertama gratis, lanjut Rp2.000/km</span>
-              </label>
-            </div>
-            <div className="flex items-center gap-2 mb-2">
-              <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={note} onChange={e=>setNote(e.target.value)} />
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setNote("")}>Clear</button>
-            </div>
-            {cart.length===0 ? (
-              <div className="text-sm text-neutral-500">Keranjang kosong.</div>
-            ) : (
-              <div className="space-y-2">
-                {cart.map(ci=>(
-                  <div key={ci.id} className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2">
-                    <div className="col-span-6">
-                      <div className="font-medium leading-tight">{ci.name}</div>
-                      {ci.note && <div className="text-xs text-neutral-500">{ci.note}</div>}
-                    </div>
-                    <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
-                    <div className="col-span-3 flex items-center justify-end gap-2">
-                      <button className="px-2 py-1 border rounded" onClick={()=>dec(ci.id)}>-</button>
-                      <div className="w-8 text-center font-medium">{ci.qty}</div>
-                      <button className="px-2 py-1 border rounded" onClick={()=>inc(ci.id)}>+</button>
-                    </div>
-                    <div className="col-span-1 text-right">
-                      <button className="px-2 py-1 rounded border" onClick={()=>rm(ci.id)}>x</button>
+        {/* Data pelanggan */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+          <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={(e) => setCustName(e.target.value)} />
+          <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={(e) => setCustPhone(e.target.value)} />
+        </div>
+        <textarea className="border rounded-lg px-3 py-2 w-full mb-2" rows={2} placeholder="Alamat pengantaran" value={custAddr} onChange={(e) => setCustAddr(e.target.value)} />
+        <label className="flex items-center gap-2 mb-4 text-sm">
+          <span>Jarak (km)</span>
+          <input
+            type="number"
+            className="border rounded-lg px-2 py-1 w-20"
+            min={1}
+            value={distanceKm}
+            onChange={(e) => setDistanceKm(Number(e.target.value) || 1)}
+          />
+          <span className="text-neutral-500 text-xs">1 km pertama gratis • {IDR(shipping)}</span>
+        </label>
+
+        {/* Menu list */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-4">
+          {menu.map((p) => (
+            <button
+              key={p.id}
+              onClick={() => addToCart(p)}
+              className="bg-white border rounded-2xl p-3 text-left hover:shadow"
+            >
+              <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
+                {p.imageUrl && <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover" />}
+              </div>
+              <div className="font-medium">{p.name}</div>
+              <div className="text-xs text-neutral-500">{p.category || "Signature"}</div>
+              <div className="font-semibold mt-1">{IDR(p.price)}</div>
+            </button>
+          ))}
+        </div>
+
+        {/* Cart */}
+        <div className="bg-neutral-50 border rounded-2xl p-3 mb-4">
+          {cart.length === 0 ? (
+            <div className="text-sm text-neutral-500">Belum ada item dipilih.</div>
+          ) : (
+            <div className="space-y-2">
+              {cart.map((ci) => (
+                <div key={ci.id} className="flex items-center justify-between border rounded-xl p-2">
+                  <div>
+                    <div className="font-medium">{ci.name}</div>
+                    <div className="text-xs text-neutral-500">
+                      {ci.qty} × {IDR(ci.price)}
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-            <div className="my-3 border-t pt-3 space-y-2">
-              <div className="flex items-center justify-between text-sm"><span>Subtotal</span><span className="font-medium">{IDR(subtotal)}</span></div>
-              <div className="flex items-center justify-between text-sm"><span>Ongkir</span><span className="font-medium">{IDR(shipping)}</span></div>
-              <div className="flex items-center justify-between text-lg font-semibold"><span>Total</span><span>{IDR(total)}</span></div>
-            </div>
-            <div className="grid grid-cols-1 gap-2 mb-2">
-              <label className="text-sm">Metode bayar</label>
-              <select className="border rounded-lg px-3 py-2" value={method} onChange={e=>setMethod(e.target.value as any)}>
-                <option value="qris">QRIS (online)</option>
-                <option value="cod">COD (cash di tempat)</option>
-              </select>
-              {method==="qris" && (
-                <div className="border rounded-xl p-2 bg-emerald-50">
-                  <div className="text-sm mb-1">Scan untuk bayar:</div>
-                  <img src={QRIS_IMG_SRC} alt="QRIS" className="w-40" />
-                  <div className="text-xs text-neutral-500 mt-1">* Setelah sukses, tekan “Kirim Pesanan”.</div>
+                  <button className="px-2 py-1 border rounded" onClick={() => setCart((prev) => prev.filter((x) => x.id !== ci.id))}>
+                    x
+                  </button>
                 </div>
-              )}
+              ))}
             </div>
-            <div className="flex justify-between gap-2">
-              <button className="px-3 py-2 rounded-lg border" onClick={()=>setCart([])}>Bersihkan</button>
-              <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
-                      disabled={sending || cart.length===0 || !custName || !custPhone || !custAddr}
-                      onClick={submitOrder}>
-                {sending? "Mengirim..." : "Kirim Pesanan"}
-              </button>
+          )}
+          {cart.length > 0 && (
+            <div className="mt-3 space-y-1 text-sm">
+              <div className="flex justify-between">
+                <span>Subtotal</span>
+                <span>{IDR(subtotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Ongkir</span>
+                <span>{IDR(shipping)}</span>
+              </div>
+              <div className="flex justify-between font-semibold">
+                <span>Total</span>
+                <span>{IDR(total)}</span>
+              </div>
             </div>
-          </div>
-        </section>
-      </main>
+          )}
+        </div>
+
+        {/* Metode bayar */}
+        <div className="mb-4">
+          <label className="block mb-1 text-sm font-medium">Metode pembayaran</label>
+          <select className="border rounded-lg px-3 py-2" value={method} onChange={(e) => setMethod(e.target.value as any)}>
+            <option value="qris">QRIS (online)</option>
+            <option value="cod">Bayar di Tempat (COD)</option>
+          </select>
+          {method === "qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
+        </div>
+
+        <button
+          disabled={sending}
+          className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
+          onClick={submitOrder}
+        >
+          {sending ? "Mengirim..." : "Kirim Pesanan"}
+        </button>
+      </div>
     </div>
   );
 }
-
 /* =================================
    MAIN APP
 ================================== */
