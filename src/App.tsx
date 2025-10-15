@@ -1506,48 +1506,114 @@ export function PublicOrder() {
     })();
   }, [outlet]);
 
-  async function submitOrder(){
-  if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
-  if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
+  {/* Product Modal */}
+{showProdModal && (
+  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowProdModal(false)}>
+    <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+      <h3 className="font-semibold mb-2">{prodForm.id?"Edit Produk":"Tambah Produk"}</h3>
+      <div className="space-y-2">
+        <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama"
+               value={igFormSafe(prodForm.name)} onChange={e=>setProdForm({...prodForm, name:e.target.value})}/>
+        <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Harga"
+               value={Number(prodForm.price||0)} onChange={e=>setProdForm({...prodForm, price:Number(e.target.value)||0})}/>
+        <input className="border rounded-lg px-3 py-2 w-full" placeholder="Kategori (opsional)"
+               value={igFormSafe(prodForm.category,"Signature")} onChange={e=>setProdForm({...prodForm, category:e.target.value})}/>
+        <input className="border rounded-lg px-3 py-2 w-full" placeholder="URL Gambar (opsional)"
+               value={igFormSafe(prodForm.imageUrl)} onChange={e=>setProdForm({...prodForm, imageUrl:e.target.value})}/>
+        <label className="inline-flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={prodForm.active!==false}
+                 onChange={e=>setProdForm({...prodForm, active:e.target.checked})}/>
+          Aktif
+        </label>
+      </div>
+      <div className="mt-3 flex justify-end gap-2">
+        <button className="px-3 py-2 border rounded" onClick={()=>setShowProdModal(false)}>Batal</button>
+        <button className="px-3 py-2 bg-emerald-600 text-white rounded" onClick={async ()=>{
+          if(!isOwner) return alert("Hanya owner.");
+          if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
+          const id = (prodForm.id as string) || uid();
+          await setDoc(doc(db,"products",id), {
+            outlet: OUTLET,
+            name: prodForm.name,
+            price: Number(prodForm.price||0),
+            imageUrl: prodForm.imageUrl || "",
+            category: prodForm.category || "Signature",
+            active: prodForm.active!==false
+          }, { merge:true });
+          setShowProdModal(false);
+        }}>Simpan</button>
+      </div>
+    </div>
+  </div>
+)}
 
-  setSending(true);
-  const data = {
-    outlet,
-    source:"public",
-    customerName:custName,
-    customerPhone:custPhone,
-    address:custAddr,
-    distance: distanceKm,
-    method,
-    time: serverTimestamp(),
-    items: cart.map(c=>({productId:c.productId, name:c.name, price:c.price, qty:c.qty})),
-    subtotal, shipping, total, status:"pending"
-  };
+{/* Ingredient Modal */}
+{showIngModal && (
+  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowIngModal(false)}>
+    <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+      <h3 className="font-semibold mb-2">{ingForm.id?"Edit Bahan":"Tambah Bahan"}</h3>
+      <div className="space-y-2">
+        <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama bahan"
+               value={igFormSafe(ingForm.name)} onChange={e=>setIngForm({...ingForm, name:e.target.value})}/>
+        <input className="border rounded-lg px-3 py-2 w-full" placeholder="Satuan (ml, gr, pcs...)"
+               value={igFormSafe(ingForm.unit,"pcs")} onChange={e=>setIngForm({...ingForm, unit:e.target.value})}/>
+        <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Stok"
+               value={Number(ingForm.stock||0)} onChange={e=>setIngForm({...ingForm, stock:Number(e.target.value)||0})}/>
+        <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Minimal stok (peringatan)"
+               value={Number(ingForm.min||0)} onChange={e=>setIngForm({...ingForm, min:Number(e.target.value)||0})}/>
+      </div>
+      <div className="mt-3 flex justify-end gap-2">
+        <button className="px-3 py-2 border rounded" onClick={()=>setShowIngModal(false)}>Batal</button>
+        <button className="px-3 py-2 bg-emerald-600 text-white rounded" onClick={async ()=>{
+          if(!isOwner) return alert("Hanya owner.");
+          if(!ingForm.name) return alert("Nama bahan wajib diisi.");
+          const id = (ingForm.id as string) || uid();
+          await setDoc(doc(db,"ingredients",id), {
+            outlet: OUTLET,
+            name: ingForm.name,
+            unit: ingForm.unit||"pcs",
+            stock: Number(ingForm.stock||0),
+            min: Number(ingForm.min||0)
+          }, { merge:true });
+          setShowIngModal(false);
+        }}>Simpan</button>
+      </div>
+    </div>
+  </div>
+)}
 
-  // simpan order
-  const ref = await addDoc(collection(db,"orders"), data);
-
-  // panggil serverless function (token tetap aman di server)
-  try {
-    await fetch("/api/notify", {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({
-        orderId: ref.id,
-        outlet,
-        customerName: custName,
-        customerPhone: custPhone,
-        address: custAddr,
-        distance: distanceKm,
-        method,
-        items: cart.map(c=>({ name:c.name, qty:c.qty, price:c.price })),
-        subtotal, shipping, total,
-        timeISO: new Date().toLocaleString("id-ID", { hour12:false })
-      })
-    });
-  } catch {}
-
-  setSending(false);
-  alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
-  setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistanceKm(0);
-}
+{/* Recipe Modal */}
+{showRecipeModal && recipeProduct && (
+  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowRecipeModal(false)}>
+    <div className="bg-white rounded-2xl p-4 w-full max-w-lg" onClick={e=>e.stopPropagation()}>
+      <h3 className="font-semibold mb-2">Resep: {recipeProduct.name}</h3>
+      <div className="space-y-2">
+        {recipeRows.map((r,idx)=>(
+          <div key={idx} className="grid grid-cols-6 gap-2">
+            <select className="col-span-4 border rounded-lg px-2 py-2" value={r.ingredientId}
+                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}>
+              {ingredients.map(ing=><option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
+            </select>
+            <input type="number" className="col-span-1 border rounded-lg px-2 py-2" value={r.qty}
+                   onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}/>
+            <button className="col-span-1 border rounded"
+                    onClick={()=>setRecipeRows(prev=>prev.filter((_,i)=>i!==idx))}>x</button>
+          </div>
+        ))}
+        <button className="px-3 py-2 border rounded"
+                onClick={()=>setRecipeRows(prev=>[...prev, {ingredientId: ingredients[0]?.id||"", qty:1}])}>
+          + Tambah baris
+        </button>
+      </div>
+      <div className="mt-3 flex justify-end gap-2">
+        <button className="px-3 py-2 border rounded" onClick={()=>setShowRecipeModal(false)}>Batal</button>
+        <button className="px-3 py-2 bg-emerald-600 text-white rounded" onClick={async ()=>{
+          if(!isOwner) return alert("Hanya owner.");
+          const clean = recipeRows.filter(r => r.ingredientId && r.qty>0);
+          await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
+          setShowRecipeModal(false);
+        }}>Simpan Resep</button>
+      </div>
+    </div>
+  </div>
+)}
