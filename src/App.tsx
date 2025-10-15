@@ -1509,40 +1509,49 @@ export function PublicOrder() {
   }, [outlet]);
 
   async function submitOrder() {
-    if (cart.length === 0) return alert("Keranjang masih kosong.");
-    if (!custName.trim() || !custPhone.trim() || !custAddr.trim()) {
-      return alert("Nama, No. HP, dan Alamat wajib diisi.");
-    }
-    setSending(true);
-    try {
-      const orderData: Omit<PublicOrderDoc, "id"> = {
-        outlet,
-        source: "public",
-        customerName: custName,
-        customerPhone: custPhone,
-        address: custAddr,
-        distance: distanceKm,
-        method,
-        time: serverTimestamp(),
-        items: cart.map(c => ({ productId: c.productId, name: c.name, price: c.price, qty: c.qty, note: c.note })),
-        subtotal,
-        shipping,
-        total,
-        status: "pending",
-      };
-      await addDoc(collection(db, "orders"), orderData);
-      alert("Pesanan berhasil dikirim! Mohon tunggu konfirmasi dari kami.");
-      setCart([]);
-      setCustName("");
-      setCustPhone("");
-      setCustAddr("");
-      setDistanceKm(0);
-    } catch (e: any) {
-      alert("Gagal mengirim pesanan: " + e.message);
-    } finally {
-      setSending(false);
-    }
+  if (cart.length === 0) return alert("Pilih menu terlebih dahulu.");
+  if (!custName || !custPhone || !custAddr)
+    return alert("Lengkapi identitas & alamat.");
+
+  setSending(true);
+
+  const safeItems = cart.map((c) => ({
+    productId: c.productId || "",
+    name: c.name || "-",
+    price: Number(c.price || 0),
+    qty: Number(c.qty || 0),
+  }));
+
+  const data = {
+    outlet: outlet || OUTLET,
+    source: "public",
+    customerName: custName.trim(),
+    customerPhone: custPhone.trim(),
+    address: custAddr.trim(),
+    distance: Number(distanceKm || 0),
+    method: method || "qris",
+    time: serverTimestamp(),
+    items: safeItems,
+    subtotal: Number(subtotal || 0),
+    shipping: Number(shipping || 0),
+    total: Number(total || 0),
+    status: "pending",
+  };
+
+  try {
+    await addDoc(collection(db, "orders"), data);
+    alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
+    setCart([]);
+    setCustName("");
+    setCustPhone("");
+    setCustAddr("");
+    setDistanceKm(0);
+  } catch (e: any) {
+    alert("Gagal mengirim pesanan: " + (e?.message || e));
+  } finally {
+    setSending(false);
   }
+}
   
   // INI BAGIAN YANG DIPERBAIKI: Menambahkan return JSX untuk UI
   return (
