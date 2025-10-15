@@ -1616,5 +1616,5 @@ export function PublicOrder() {
       </div>
     </div>
   </div>
-)}
+)};
 
