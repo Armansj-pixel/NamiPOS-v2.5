@@ -1,18 +1,17 @@
 {
   "compilerOptions": {
-    "target": "ES2021",
-    "lib": ["ES2021", "DOM"],
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    "target": "es2020",
+    "lib": ["dom", "es2020"],
     "jsx": "react-jsx",
-    "types": ["vite/client"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "strict": true,
     "skipLibCheck": true,
-    "strict": false
-  },
-  "include": ["src"]
-{
-  "compilerOptions": {
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
     "types": ["node"]
-  }
-}
+  },
+  "include": ["src", "vite-env.d.ts", "api/**/*.ts"],
+  "exclude": ["node_modules"]
 }
