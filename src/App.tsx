@@ -1,130 +1,141 @@
-// src/App.tsx  — NamiPOS v2.5.3 (full, stable)
+/* App.tsx — NamiPOS v2.5.4 (stable fixed full)
+   Fitur: POS, Shift, Produk, Inventori, Resep (auto stock), Loyalty (15k=1 poin),
+   Riwayat (hapus by owner), Dashboard, Public Order (/order?outlet=...)
+*/
+
 import React, { useEffect, useMemo, useState } from "react";
 import {
   addDoc, collection, deleteDoc, doc, getDoc, getDocs, onSnapshot,
-  orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc, where,
-  limit, startAfter
+  orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc,
+  where, limit, startAfter
 } from "firebase/firestore";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { auth, db } from "./lib/firebase";
+import { query as queryFS } from "firebase/firestore";
 
-/* ===== Delivery Types & Utils (ADD) ===== */
-type DeliveryOrder = {
-  id?: string;
-  outlet: string;
-  items: { productId: string; name: string; price: number; qty: number }[];
-  note?: string;
-  customer: { name: string; phone: string; address: string; lat?: number; lng?: number };
-  payment: "qris" | "cod";
-  distanceKm: number;
-  shippingCost: number;
-  subtotal: number;
-  total: number;
-  status: "new" | "accepted" | "rejected" | "delivered" | "cancelled";
-  createdAt: any;
-};
-
-const calcShipping = (km: number) => {
-  // 1 km pertama gratis, sisanya dibulatkan ke atas per km x 2000
-  const afterFree = Math.max(0, km - 1);
-  return Math.ceil(afterFree) * 2000;
-};
 /* ==========================
-   KONFIG & KONST
+   KONFIG
 ========================== */
-const APP_NAME = "NamiPOS";
 const OUTLET = "MTHaryono";
 const OWNER_EMAILS = new Set([
   "antonius.arman123@gmail.com",
   "ayuismaalabibbah@gmail.com",
 ]);
-
-const LOGO_SRC = "/logo.png";         // letakkan file logo di /public/logo.png
-const QRIS_IMG_SRC = "/qris.png";     // letakkan file QRIS di /public/qris.png
+const BRAND_LOGO = "/brand-logo.png";
+const QRIS_IMG_SRC = "/qris.png";
+const POINT_PER_RP = 15000;
+const FREE_DRINK_POINTS = 10;
+const SHIPPING_PER_KM = 2000;
 
 /* ==========================
    TYPES
 ========================== */
 type Product = {
-  id: string; name: string; price: number; category?: string; active?: boolean; outlet?: string;
-  image?: string | null;
+  id: string; name: string; price: number; imageUrl?: string;
+  category?: string; active?: boolean; outlet?: string;
 };
-type Ingredient = { id: string; name: string; unit: string; stock: number; min?: number; outlet?: string };
-type RecipeItem = { ingredientId: string; qty: number };
-type RecipeDoc = { items: RecipeItem[] };
-
-type CartItem = { id: string; productId: string; name: string; price: number; qty: number; note?: string };
-
-type Shift = {
-  id: string; outlet: string; openBy: string; openAt: Timestamp | any; closeAt?: Timestamp | any | null; openCash?: number; isOpen: boolean;
-  recap?: { trx: number; omzet: number; cash: number; ewallet: number; qris: number };
+type Ingredient = {
+  id: string; name: string; unit: string; stock: number;
+  min?: number; outlet?: string;
 };
-
+type RecipeItem = { ingredientId: string; qty: number; };
+type RecipeDoc = { id: string; items: RecipeItem[]; };
+type CartItem = { id: string; productId: string; name: string; price: number; qty: number; note?: string; };
+type Shift = { id: string; outlet: string; openBy: string; openAt: Timestamp; closeAt?: Timestamp | null; openCash?: number; isOpen: boolean; };
 type Sale = {
-  id?: string;
-  outlet: string;
-  shiftId: string | null;
-  cashierEmail: string;
-  customerPhone: string | null;
-  customerName?: string | null;
-  time: any; // pakai any agar kompatibel serverTimestamp
+  id?: string; outlet: string; shiftId: string | null; cashierEmail: string;
+  customerPhone: string | null; customerName?: string | null; time: Timestamp | null;
   items: { name: string; price: number; qty: number; note?: string }[];
-  subtotal: number; discount: number; tax: number; service: number; total: number;
-  payMethod: "cash" | "ewallet" | "qris";
-  cash?: number; change?: number;
-};
-
-type OrderPublic = {
-  id?: string;
-  outlet: string;
-  time: any;
-  customerName: string;
-  customerPhone: string;
-  address?: string | null;
-  payMethod: "COD" | "QRIS";
-  items: { name: string; price: number; qty: number; note?: string }[];
-  subtotal: number; deliveryFee: number; total: number; status: "pending" | "accepted" | "done" | "cancelled";
+  subtotal: number; discount: number; tax: number; service: number;
+  total: number; payMethod: "cash" | "ewallet" | "qris"; cash?: number; change?: number;
+  pointsEarned?: number; usedFreeDrink?: boolean;
 };
 
 /* ==========================
-   UTIL
+   UTILITIES
 ========================== */
 const uid = () => Math.random().toString(36).slice(2, 10);
-const IDR = (n: number) => new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
+const IDR = (n: number) =>
+  new Intl.NumberFormat("id-ID", { style: "currency", currency: "IDR", maximumFractionDigits: 0 }).format(n || 0);
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
 const endOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(23, 59, 59, 999); return x; };
 const daysAgo = (n: number) => { const x = new Date(); x.setDate(x.getDate() - n); return x; };
-const earnPoints = (total: number) => Math.floor((total || 0) / 15000); // 15.000 = 1 poin
-
-const getQueryParam = (k: string) => {
-  try { return new URLSearchParams(window.location.search).get(k) || ""; } catch { return ""; }
+const calcShipping = (km: number) => {
+  const afterFree = Math.max(0, (Number.isFinite(km) ? km : 1) - 1);
+  return Math.ceil(afterFree) * SHIPPING_PER_KM;
 };
+
 /* ==========================
-   APP
+   RECIPE & STOCK HELPERS
+========================== */
+async function fetchRecipe(productId: string): Promise<RecipeDoc | null> {
+  const r = await getDoc(doc(db, "recipes", productId));
+  if (!r.exists()) return null;
+  const x = r.data() as any;
+  return { id: r.id, items: Array.isArray(x.items) ? x.items : [] };
+}
+
+async function checkShortageForCart(cartPairs: { productId: string; qty: number }[]) {
+  const ingNeeds = new Map<string, number>();
+  for (const pair of cartPairs) {
+    const recipe = await fetchRecipe(pair.productId);
+    if (!recipe) continue;
+    for (const it of recipe.items) {
+      ingNeeds.set(it.ingredientId, (ingNeeds.get(it.ingredientId) || 0) + (it.qty * pair.qty));
+    }
+  }
+  if (ingNeeds.size === 0) return { ok: true as const };
+  const shortages: { name: string; need: number; have: number; unit: string }[] = [];
+  for (const ingId of Array.from(ingNeeds.keys())) {
+    const snap = await getDoc(doc(db, "ingredients", ingId));
+    if (!snap.exists()) {
+      shortages.push({ name: `#${ingId}`, need: ingNeeds.get(ingId) || 0, have: 0, unit: "-" });
+      continue;
+    }
+    const d = snap.data() as any;
+    const need = ingNeeds.get(ingId) || 0;
+    const have = Number(d.stock || 0);
+    const unit = d.unit || "-";
+    if (have < need) shortages.push({ name: d.name || `#${ingId}`, need, have, unit });
+  }
+  if (shortages.length) return { ok: false as const, shortages };
+  return { ok: true as const };
+}
+
+async function deductStockForCart(cartPairs: { productId: string; qty: number }[]) {
+  for (const pair of cartPairs) {
+    const recipe = await fetchRecipe(pair.productId);
+    if (!recipe) continue;
+    for (const it of recipe.items) {
+      const ref = doc(db, "ingredients", it.ingredientId);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) continue;
+      const cur = snap.data() as any;
+      const newStock = Math.max(0, Number(cur.stock || 0) - (it.qty * pair.qty));
+      await updateDoc(ref, { stock: newStock });
+    }
+  }
+}
+/* ==========================
+   APP (state, auth, data, shift, loyalty, finalize, print, history, dashboard)
 ========================== */
 export default function App() {
-  /* ---- mode order publik ---- */
-  const url = new URL(window.location.href);
-  const isPublicOrder = url.searchParams.get("order") === "1";
-
   /* ---- auth ---- */
   const [user, setUser] = useState<null | { email: string }>(null);
   const isOwner = !!(user?.email && OWNER_EMAILS.has(user.email));
 
   /* ---- tabs ---- */
-  const [tab, setTab] = useState<"dashboard" | "pos" | "history" | "products" | "inventory" | "recipes">("pos");
+  const [tab, setTab] = useState<"dashboard"|"pos"|"history"|"products"|"inventory">("pos");
 
   /* ---- login form ---- */
-  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
+  const [email, setEmail] = useState(""); 
+  const [password, setPassword] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
 
   /* ---- master ---- */
   const [products, setProducts] = useState<Product[]>([]);
   const [ingredients, setIngredients] = useState<Ingredient[]>([]);
-
-  /* ---- resep (owner) ---- */
-  const [recipeOf, setRecipeOf] = useState<string | null>(null); // productId yang sedang diedit resepnya
-  const [recipeItems, setRecipeItems] = useState<RecipeItem[]>([]);
+  const [recipes, setRecipes] = useState<Record<string, RecipeItem[]>>({}); // productId -> items
 
   /* ---- POS ---- */
   const [queryText, setQueryText] = useState("");
@@ -133,17 +144,18 @@ export default function App() {
   const [discount, setDiscount] = useState(0);
   const [taxPct, setTaxPct] = useState(0);
   const [svcPct, setSvcPct] = useState(0);
-  const [payMethod, setPayMethod] = useState<"cash" | "ewallet" | "qris">("cash");
+  const [payMethod, setPayMethod] = useState<"cash"|"ewallet"|"qris">("cash");
   const [cash, setCash] = useState<number>(0);
   const [showQR, setShowQR] = useState(false);
 
   /* ---- loyalty ---- */
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerName, setCustomerName] = useState("");
-  const [customerPoints, setCustomerPoints] = useState<number | null>(null);
+  const [customerPoints, setCustomerPoints] = useState<number|null>(null);
+  const [useFreeDrink, setUseFreeDrink] = useState(false);
 
   /* ---- shift ---- */
-  const [activeShift, setActiveShift] = useState<Shift | null>(null);
+  const [activeShift, setActiveShift] = useState<Shift|null>(null);
   const [openCash, setOpenCash] = useState<number>(0);
 
   /* ---- history ---- */
@@ -153,107 +165,118 @@ export default function App() {
 
   /* ---- dashboard ---- */
   const [dashLoading, setDashLoading] = useState(false);
-  const [todayStats, setTodayStats] = useState({ omzet: 0, trx: 0, avg: 0, cash: 0, ewallet: 0, qris: 0, topItems: [] as { name: string; qty: number }[] });
-  const [last7, setLast7] = useState<{ date: string; omzet: number; trx: number }[]>([]);
+  const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
+  const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
 
   /* ---- computed ---- */
   const filteredProducts = useMemo(
-    () => products.filter(p => (p.active !== false) && p.name.toLowerCase().includes(queryText.toLowerCase())),
+    () => products.filter(p => (p.active!==false) && p.name.toLowerCase().includes(queryText.toLowerCase())),
     [products, queryText]
   );
-  const subtotal = useMemo(() => cart.reduce((s, i) => s + i.price * i.qty, 0), [cart]);
-  const taxVal = Math.round(subtotal * (taxPct / 100));
-  const svcVal = Math.round(subtotal * (svcPct / 100));
-  const total = Math.max(0, subtotal + taxVal + svcVal - (discount || 0));
-  const change = Math.max(0, (cash || 0) - total);
+  const subtotal = useMemo(()=> cart.reduce((s,i)=> s + i.price*i.qty, 0), [cart]);
+  const taxVal = Math.round(subtotal * (taxPct/100));
+  const svcVal = Math.round(subtotal * (svcPct/100));
+  const totalBeforeLoyalty = Math.max(0, subtotal + taxVal + svcVal - (discount||0));
+  const cheapest = cart.length ? Math.min(...cart.map(c=>c.price)) : 0;
+  const loyaltyDiscount = useFreeDrink ? Math.min(cheapest, totalBeforeLoyalty) : 0;
+  const total = Math.max(0, totalBeforeLoyalty - loyaltyDiscount);
+  const change = Math.max(0, (cash||0) - total);
 
   /* ==========================
      AUTH WATCH
   =========================== */
-  useEffect(() => {
-    if (isPublicOrder) { setUser(null); return; }
-    const unsub = onAuthStateChanged(auth, u => {
-      setUser(u?.email ? { email: u.email } : null);
+  useEffect(()=>{
+    const unsub = onAuthStateChanged(auth, u=>{
+      setUser(u?.email? {email:u.email}: null);
     });
     return () => unsub();
-    // eslint-disable-next-line
-  }, []);
+  },[]);
 
   /* ==========================
-     LOAD DATA
+     LOAD DATA AFTER LOGIN
   =========================== */
-  useEffect(() => {
-    // Produk & Inventori untuk POS (login) atau publik (tanpa login)
-    const qProd = query(collection(db, "products"), where("outlet", "==", OUTLET));
-    const unsubProd = onSnapshot(qProd, snap => {
-      const rows: Product[] = snap.docs.map(d => {
+  useEffect(()=>{
+    if(!user) return;
+
+    // products
+    const qProd = query(collection(db,"products"), where("outlet","==",OUTLET));
+    const unsubProd = onSnapshot(qProd, snap=>{
+      const rows: Product[] = snap.docs.map(d=>{
         const x = d.data() as any;
-        return { id: d.id, name: x.name, price: x.price, category: x.category, active: x.active, outlet: x.outlet, image: x.image || null };
+        return { id:d.id, name:x.name, price:x.price, imageUrl:x.imageUrl, category:x.category, active:x.active, outlet:x.outlet };
       });
       setProducts(rows);
     });
 
-    const qIng = query(collection(db, "ingredients"), where("outlet", "==", OUTLET));
-    const unsubIng = onSnapshot(qIng, snap => {
-      const rows: Ingredient[] = snap.docs.map(d => {
+    // ingredients
+    const qIng = query(collection(db,"ingredients"), where("outlet","==",OUTLET));
+    const unsubIng = onSnapshot(qIng, snap=>{
+      const rows: Ingredient[] = snap.docs.map(d=>{
         const x = d.data() as any;
-        return { id: d.id, name: x.name, unit: x.unit, stock: x.stock ?? 0, min: x.min ?? 0, outlet: x.outlet };
+        return { id:d.id, name:x.name, unit:x.unit, stock:x.stock??0, min:x.min??0, outlet:x.outlet };
       });
       setIngredients(rows);
     });
 
-    if (!isPublicOrder) {
-      // shift awal & dashboard
-      checkActiveShift().catch(() => { });
-      loadDashboard().catch(() => { });
-    }
+    // recipes (preload agar finalize cepat)
+    const unsubRecipes = onSnapshot(collection(db,"recipes"), snap=>{
+      const map: Record<string, RecipeItem[]> = {};
+      snap.docs.forEach(d=>{
+        const x = d.data() as any;
+        map[d.id] = Array.isArray(x.items)? x.items : [];
+      });
+      setRecipes(map);
+    });
 
-    return () => { unsubProd(); unsubIng(); };
+    // shift & dashboard
+    checkActiveShift().catch(()=>{});
+    loadDashboard().catch(()=>{});
+
+    return ()=>{ unsubProd(); unsubIng(); unsubRecipes(); };
     // eslint-disable-next-line
-  }, [isPublicOrder]);
+  },[user?.email]);
 
   /* ==========================
      AUTH handlers
   =========================== */
-  async function doLogin(e?: React.FormEvent) {
+  async function doLogin(e?: React.FormEvent){
     e?.preventDefault();
-    try {
+    try{
       setAuthLoading(true);
       await signInWithEmailAndPassword(auth, email.trim(), password);
       setEmail(""); setPassword("");
       setTab("pos");
-    } catch (err: any) {
-      alert("Login gagal: " + (err?.message || err));
-    } finally { setAuthLoading(false); }
+    }catch(err:any){
+      alert("Login gagal: "+(err?.message||err));
+    }finally{ setAuthLoading(false); }
   }
-  async function doLogout() { await signOut(auth); }
+  async function doLogout(){ await signOut(auth); }
 
   /* ==========================
      SHIFT
   =========================== */
-  async function checkActiveShift() {
+  async function checkActiveShift(){
     const qShift = query(
-      collection(db, "shifts"),
-      where("outlet", "==", OUTLET),
-      where("isOpen", "==", true),
-      orderBy("openAt", "desc"),
+      collection(db,"shifts"),
+      where("outlet","==",OUTLET),
+      where("isOpen","==",true),
+      orderBy("openAt","desc"),
       limit(1)
     );
     const snap = await getDocs(qShift);
-    if (snap.empty) { setActiveShift(null); return; }
+    if(snap.empty){ setActiveShift(null); return; }
     const d = snap.docs[0];
     const x = d.data() as any;
     setActiveShift({
-      id: d.id, outlet: x.outlet, openBy: x.openBy,
-      openAt: x.openAt || serverTimestamp(), closeAt: x.closeAt ?? null, openCash: x.openCash ?? 0, isOpen: true,
-      recap: x.recap
+      id:d.id, outlet:x.outlet, openBy:x.openBy,
+      openAt:x.openAt, closeAt:x.closeAt??null, openCash:x.openCash??0, isOpen:true
     });
   }
 
-  async function openShiftAction() {
-    if (!user?.email) return alert("Belum login.");
+  async function openShiftAction(){
+    if(!user?.email) return alert("Belum login.");
     const id = `SHIFT-${Date.now()}`;
-    await setDoc(doc(db, "shifts", id), {
+    await setDoc(doc(db,"shifts", id), {
       outlet: OUTLET, openBy: user.email, openAt: serverTimestamp(),
       closeAt: null, isOpen: true, openCash
     });
@@ -261,465 +284,319 @@ export default function App() {
     await checkActiveShift();
   }
 
-  async function closeShiftAction() {
-    if (!activeShift?.id) return;
-    // Rekap otomatis: hitung semua sales by shiftId
-    const qs = query(collection(db, "sales"), where("shiftId", "==", activeShift.id));
-    const ss = await getDocs(qs);
-    let trx = 0, omzet = 0, cashSum = 0, ew = 0, qr = 0;
-    ss.forEach(d => {
-      const s = d.data() as any;
-      trx += 1; omzet += s.total || 0;
-      if (s.payMethod === "cash") cashSum += s.total || 0;
-      if (s.payMethod === "ewallet") ew += s.total || 0;
-      if (s.payMethod === "qris") qr += s.total || 0;
-    });
-
-    await updateDoc(doc(db, "shifts", activeShift.id), {
-      isOpen: false,
-      closeAt: serverTimestamp(),
-      recap: { trx, omzet, cash: cashSum, ewallet: ew, qris: qr }
-    });
+  async function closeShiftAction(){
+    if(!activeShift?.id) return;
+    await updateDoc(doc(db,"shifts", activeShift.id), { isOpen:false, closeAt: serverTimestamp() });
     setActiveShift(null);
-    alert("Shift ditutup.\nRekap otomatis tersimpan.");
-    await loadDashboard();
+    alert("Shift ditutup.");
+    loadDashboard().catch(()=>{});
   }
 
   /* ==========================
-     POS helpers
+     LOYALTY
   =========================== */
-  function addToCart(p: Product) {
-    setCart(prev => {
-      const found = prev.find(ci => ci.productId === p.id && (ci.note || "") === (noteInput || ""));
-      if (found) { return prev.map(ci => ci === found ? { ...ci, qty: ci.qty + 1 } : ci); }
-      return [...prev, { id: uid(), productId: p.id, name: p.name, price: p.price, qty: 1, note: noteInput || undefined }];
-    });
+  async function fetchCustomerPoints(phone: string) {
+    if (!phone.trim()) { setCustomerPoints(null); return; }
+    const ref = doc(db,"customers", phone);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) { setCustomerPoints(0); return; }
+    const d = snap.data() as any;
+    setCustomerPoints(d.points ?? 0);
+    setCustomerName(d.name ?? "");
   }
-  const inc = (id: string) => setCart(prev => prev.map(ci => ci.id === id ? { ...ci, qty: ci.qty + 1 } : ci));
-  const dec = (id: string) => setCart(prev => prev.map(ci => ci.id === id ? { ...ci, qty: Math.max(1, ci.qty - 1) } : ci));
-  const rm = (id: string) => setCart(prev => prev.filter(ci => ci.id !== id));
-  const clearCart = () => { setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setPayMethod("cash"); setCash(0); setNoteInput(""); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); };
+  useEffect(()=>{ if(customerPhone) fetchCustomerPoints(customerPhone); }, [customerPhone]);
 
-  /* loyalty: auto lookup by phone */
-  useEffect(() => {
-    const phone = customerPhone.trim();
-    if (phone.length < 8) { setCustomerPoints(null); return; }
-    (async () => {
-      try {
-        const ref = doc(db, "customers", phone);
-        const s = await getDoc(ref);
-        if (s.exists()) {
-          const c = s.data() as any;
-          setCustomerName(c.name || ""); setCustomerPoints(c.points || 0);
-        } else {
-          setCustomerPoints(0); // pelanggan baru
-        }
-      } catch (e: any) { console.warn("Lookup customer:", e?.message || e); }
-    })();
-  }, [customerPhone]);
-
-  /* ===== Inventory helpers (recipes-aware, safe if recipe missing) ===== */
-  async function getRecipe(productId: string): Promise<RecipeItem[]> {
-    try {
-      const r = await getDoc(doc(db, "recipes", productId));
-      if (r.exists()) {
-        const data = r.data() as RecipeDoc;
-        return Array.isArray(data.items) ? data.items : [];
-      }
-    } catch (e) {
-      console.warn("getRecipe error", e);
-    }
-    return [];
-  }
-  async function collectNeedsFromCart(
-    cartItems: { productId: string; qty: number }[]
-  ): Promise<Map<string, number>> {
-    const needs = new Map<string, number>();
-    for (const ci of cartItems) {
-      const items = await getRecipe(ci.productId);
-      for (const it of items) {
-        const need = (needs.get(it.ingredientId) || 0) + it.qty * ci.qty;
-        needs.set(it.ingredientId, need);
-      }
-    }
-    return needs;
-  }
-  async function checkShortageForCart(
-    cartItems: { productId: string; qty: number }[]
-  ): Promise<{ ok: true } | { ok: false; shortages: { name: string; need: number; have: number; unit: string }[] }> {
-    const needs = await collectNeedsFromCart(cartItems);
-    if (needs.size === 0) return { ok: true };
-    const shortages: { name: string; need: number; have: number; unit: string }[] = [];
-    for (const [ingId, need] of needs.entries()) {
-      try {
-        const s = await getDoc(doc(db, "ingredients", ingId));
-        if (!s.exists()) {
-          shortages.push({ name: `#${ingId}`, need, have: 0, unit: "-" });
-          continue;
-        }
-        const x = s.data() as any;
-        const have = Number(x.stock ?? 0);
-        if (have < need) {
-          shortages.push({ name: x.name || `#${ingId}`, need, have, unit: x.unit || "-" });
-        }
-      } catch (e) {
-        console.warn("checkShortage get ingredient error", e);
-      }
-    }
-    if (shortages.length) return { ok: false, shortages };
-    return { ok: true };
-  }
-  async function deductStockForCart(
-    cartItems: { productId: string; qty: number }[]
-  ) {
-    const needs = await collectNeedsFromCart(cartItems);
-    if (needs.size === 0) return;
-    for (const [ingId, need] of needs.entries()) {
-      try {
-        const ref = doc(db, "ingredients", ingId);
-        const s = await getDoc(ref);
-        if (!s.exists()) continue;
-        const cur = Number((s.data() as any).stock ?? 0);
-        const next = Math.max(0, cur - need);
-        await updateDoc(ref, { stock: next });
-      } catch (e) {
-        console.warn("deductStock error:", e);
-      }
-    }
+  async function updateCustomerPoints(phone: string, name: string, add: number) {
+    if (!phone.trim()) return;
+    const ref = doc(db,"customers", phone);
+    const snap = await getDoc(ref);
+    const prev = snap.exists() ? (snap.data() as any).points || 0 : 0;
+    await setDoc(ref, { name, phone, points: Math.max(0, prev + add), lastVisit: serverTimestamp() }, { merge: true });
   }
 
-  /* print 80mm */
-  function printReceipt(rec: Omit<Sale, "id">, saleId?: string) {
-    const itemsHtml = rec.items.map(i => `<tr><td>${i.name}${i.note ? `<div style='font-size:10px;opacity:.7'>${i.note}</div>` : ""}</td><td style='text-align:center'>${i.qty}x</td><td style='text-align:right'>${IDR(i.price * i.qty)}</td></tr>`).join("");
-    const w = window.open("", "_blank", "width=380,height=600");
-    if (!w) return;
-    const html = `<!doctype html><html><head><meta charset="utf-8"><title>Struk</title>
-<style>
-body{font-family:ui-monospace,Consolas,monospace}
-.wrap{width:300px;margin:0 auto}
-h2{margin:6px 0;text-align:center}
-td{padding:4px 0;border-bottom:1px dashed #ccc;font-size:12px}
-.tot td{border-bottom:none;font-weight:700}
-.meta{font-size:12px;text-align:center;opacity:.8}
-img.logo{display:block;margin:0 auto 6px;height:42px}
-img.qris{display:block;margin:6px auto;height:120px}
-</style></head><body>
-<div class="wrap">
-  <img class="logo" src="${LOGO_SRC}" onerror="this.style.display='none'"/>
-  <h2>${APP_NAME} — ${OUTLET}</h2>
-  <div class="meta">${saleId || "DRAFT"}<br/>${new Date().toLocaleString("id-ID", { hour12: false })}</div>
-  <hr/>
-  <table style="width:100%;border-collapse:collapse">
-    ${itemsHtml}
-    <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${IDR(rec.subtotal)}</td></tr>
-    ${rec.tax ? `<tr class="tot"><td>Pajak</td><td></td><td style="text-align:right">${IDR(rec.tax)}</td></tr>` : ""}
-    ${rec.service ? `<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(rec.service)}</td></tr>` : ""}
-    ${rec.discount ? `<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(rec.discount)}</td></tr>` : ""}
-    <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(rec.total)}</td></tr>
-    ${rec.payMethod === "cash"
-        ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(rec.cash || 0)}</td></tr>
-           <tr><td>Kembali</td><td></td><td style='text-align:right'>${IDR(rec.change || 0)}</td></tr>`
-        : `<tr><td>Metode</td><td></td><td style='text-align:right'>${rec.payMethod.toUpperCase()}</td></tr>`
-      }
-  </table>
-  ${rec.payMethod !== "cash" ? `<img class="qris" src="${QRIS_IMG_SRC}" onerror="this.style.display='none'"/>` : ""}
-  <p class="meta">Terima kasih! — Dapatkan poin setiap transaksi.</p>
-</div>
-<script>window.print();</script>
-</body></html>`;
-    w.document.write(html); w.document.close();
-  }
-
-  /* finalize */
-  async function finalize() {
-    if (!user?.email) return alert("Belum login.");
-    if (!activeShift?.id) return alert("Buka shift dahulu.");
+  /* ==========================
+     FINALIZE TRANSACTION
+  =========================== */
+  async function finalizeSale() {
+    if (!activeShift?.id) return alert("Shift belum dibuka.");
     if (cart.length === 0) return alert("Keranjang kosong.");
-    if (payMethod === "cash" && cash < total) return alert("Uang tunai kurang.");
+    if (payMethod==="cash" && cash < total) return alert("Tunai kurang.");
 
-    // Cek stok berdasarkan resep
-    const stockCheck = await checkShortageForCart(
-  cart.map(i => ({ productId: i.productId, qty: i.qty }))
-);
+    // cek stok dulu
+    const shortage = await checkShortageForCart(cart.map(c => ({ productId: c.productId, qty: c.qty })));
+    if (!shortage.ok) {
+      return alert(
+        "Stok tidak mencukupi:\n" +
+        shortage.shortages.map(s => `${s.name}: butuh ${s.need}${s.unit}, sisa ${s.have}`).join("\n")
+      );
+    }
 
-if ("ok" in stockCheck && stockCheck.ok === false && Array.isArray(stockCheck.shortages)) {
-  const lines = stockCheck.shortages
-    .map(s => `• ${s.name}: perlu ${s.need} ${s.unit}, stok ${s.have}`)
-    .join("\n");
-  alert("Stok tidak mencukupi:\n\n" + lines);
-  return;
-}
-    const payload: Omit<Sale, "id"> = {
-      outlet: OUTLET, shiftId: activeShift.id, cashierEmail: user.email,
-      customerPhone: customerPhone?.trim() || null, customerName: customerName?.trim() || null,
+    // kurangi stok
+    await deductStockForCart(cart.map(c => ({ productId: c.productId, qty: c.qty })));
+
+    // loyalty
+    const pointsEarned = Math.floor(total / POINT_PER_RP);
+    const usedFreeDrink = useFreeDrink;
+
+    // simpan sale
+    const saleData: Sale = {
+      outlet: OUTLET,
+      shiftId: activeShift.id,
+      cashierEmail: user?.email || "",
+      customerPhone: customerPhone || null,
+      customerName: customerName || null,
       time: serverTimestamp() as any,
-      items: cart.map(i => ({ name: i.name, price: i.price, qty: i.qty, ...(i.note ? { note: i.note } : {}) })),
-      subtotal, discount: discount || 0, tax: taxVal, service: svcVal, total, payMethod,
-      ...(payMethod === "cash" ? { cash, change } : {})
+      items: cart.map(c => ({ name: c.name, price: c.price, qty: c.qty, ...(c.note?{note:c.note}:{}) })),
+      subtotal, discount, tax: taxVal, service: svcVal,
+      total, payMethod, cash, change,
+      pointsEarned, usedFreeDrink
     };
 
-    try {
-      const ref = await addDoc(collection(db, "sales"), payload as any);
+    // cetak dulu (pakai state saat ini), lalu simpan + reset
+    printReceipt();
 
-      // loyalty
-      if ((customerPhone.trim().length) >= 8) {
-        const cref = doc(db, "customers", customerPhone.trim());
-        const s = await getDoc(cref);
-        const pts = earnPoints(total);
-        if (s.exists()) {
-          const c = s.data() as any;
-          await updateDoc(cref, { points: (c.points || 0) + pts, name: customerName || c.name || "", lastVisit: serverTimestamp() });
-        } else {
-          await setDoc(cref, { phone: customerPhone.trim(), name: customerName || "Member", points: pts, lastVisit: serverTimestamp() });
-        }
-      }
+    await addDoc(collection(db,"sales"), saleData);
 
-      // potong stok
-      await deductStockForCart(cart.map(i => ({ productId: i.productId, qty: i.qty })));
-
-      printReceipt(payload, ref.id);
-      clearCart();
-      if (tab === "history") loadHistory(false);
-      if (isOwner && tab === "dashboard") loadDashboard().catch(() => { });
-
-    } catch (err: any) {
-      alert("Transaksi gagal disimpan: " + (err?.message || err));
+    if (customerPhone) {
+      const adj = usedFreeDrink ? -FREE_DRINK_POINTS + pointsEarned : pointsEarned;
+      await updateCustomerPoints(customerPhone, customerName || "Member", adj);
     }
+
+    alert("Transaksi berhasil ✅");
+
+    // reset
+    setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0);
+    setCash(0); setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null);
+    setUseFreeDrink(false);
+
+    // refresh
+    loadHistory(false).catch(()=>{});
+    loadDashboard().catch(()=>{});
+  }
+
+  /* ==========================
+     PRINT 80mm
+  =========================== */
+  function printReceipt() {
+    const win = window.open("", "_blank", "width=400,height=600");
+    if (!win) return;
+    win.document.write(`
+      <html><head><title>Struk</title>
+      <style>
+        body{font-family:ui-monospace,Consolas,monospace;font-size:12px}
+        .wrap{width:300px;margin:0 auto}
+        h2{margin:6px 0;text-align:center}
+        td{padding:4px 0;border-bottom:1px dashed #ccc;font-size:12px}
+        .tot td{border-bottom:none;font-weight:700}
+        .meta{font-size:12px;text-align:center;opacity:.8}
+        img.logo{display:block;margin:0 auto 6px;height:42px}
+      </style></head><body>
+      <div class="wrap">
+        <img class="logo" src="${BRAND_LOGO}" onerror="this.style.display='none'"/>
+        <h2>NamiPOS — ${OUTLET}</h2>
+        <div class="meta">${new Date().toLocaleString("id-ID",{hour12:false})}</div>
+        <hr/>
+        <table style="width:100%;border-collapse:collapse">
+          ${cart.map(i=>`<tr><td>${i.name}${i.note?`<div style='font-size:10px;opacity:.7'>${i.note}</div>`:""}</td><td style='text-align:center'>${i.qty}x</td><td style='text-align:right'>${IDR(i.price*i.qty)}</td></tr>`).join("")}
+          <tr class="tot"><td>Subtotal</td><td></td><td style="text-align:right">${IDR(subtotal)}</td></tr>
+          ${taxVal?`<tr class="tot"><td>Pajak</td><td></td><td style="text-align:right">${IDR(taxVal)}</td></tr>`:""}
+          ${svcVal?`<tr class="tot"><td>Service</td><td></td><td style="text-align:right">${IDR(svcVal)}</td></tr>`:""}
+          ${discount?`<tr class="tot"><td>Diskon</td><td></td><td style="text-align:right">-${IDR(discount)}</td></tr>`:""}
+          ${useFreeDrink?`<tr class="tot"><td>Tukar Poin</td><td></td><td style="text-align:right">-${IDR(loyaltyDiscount)}</td></tr>`:""}
+          <tr class="tot"><td>Total</td><td></td><td style="text-align:right">${IDR(total)}</td></tr>
+          ${payMethod==="cash"
+            ? `<tr><td>Tunai</td><td></td><td style='text-align:right'>${IDR(cash||0)}</td></tr>
+               <tr><td>Kembali</td><td></td><td style='text-align:right'>${IDR(change||0)}</td></tr>`
+            : `<tr><td>Metode</td><td></td><td style='text-align:right'>${payMethod.toUpperCase()}</td></tr>`
+          }
+        </table>
+        ${payMethod!=="cash" ? `<div class="meta" style="margin-top:6px"><img src="${QRIS_IMG_SRC}" style="height:120px"/></div>` : ""}
+        <p class="meta">Terima kasih! • Modern Ritual, Hembusan Ketenangan 🍵</p>
+      </div>
+      <script>window.print();</script>
+      </body></html>
+    `);
+    win.document.close();
   }
 
   /* ==========================
      HISTORY
   =========================== */
-  async function loadHistory(append: boolean) {
+  async function loadHistory(next:boolean){
     setHistoryLoading(true);
-    try {
-      const cons: any[] = [where("outlet", "==", OUTLET), orderBy("time", "desc"), limit(50)];
-      if (append && histCursor) cons.push(startAfter(histCursor));
-      const qh = query(collection(db, "sales"), ...cons);
-      const snap = await getDocs(qh);
-      const rows: Sale[] = snap.docs.map(d => {
+    try{
+      const base = query(
+        collection(db,"sales"),
+        where("outlet","==",OUTLET),
+        orderBy("time","desc"),
+        limit(20)
+      );
+      const qHist = next && histCursor ? query(base, startAfter(histCursor)) : base;
+      const snap = await getDocs(qHist);
+      const rows: Sale[] = snap.docs.map(d=>{
         const x = d.data() as any;
         return {
-          id: d.id,
-          outlet: x.outlet, shiftId: x.shiftId ?? null, cashierEmail: x.cashierEmail,
-          customerPhone: x.customerPhone ?? null, customerName: x.customerName ?? null,
-          time: x.time ?? null,
-          items: x.items || [],
-          subtotal: x.subtotal ?? 0, discount: x.discount ?? 0, tax: x.tax ?? 0, service: x.service ?? 0,
-          total: x.total ?? 0, payMethod: x.payMethod ?? "cash", cash: x.cash ?? 0, change: x.change ?? 0
+          id:d.id, outlet:x.outlet, shiftId:x.shiftId??null, cashierEmail:x.cashierEmail,
+          customerPhone:x.customerPhone??null, customerName:x.customerName??null,
+          time:x.time??null, items:x.items||[],
+          subtotal:x.subtotal??0, discount:x.discount??0, tax:x.tax??0, service:x.service??0,
+          total:x.total??0, payMethod:x.payMethod??"cash", cash:x.cash??0, change:x.change??0
         };
       });
-      setHistoryRows(prev => append ? [...prev, ...rows] : rows);
-      setHistCursor(snap.docs.length ? snap.docs[snap.docs.length - 1] : null);
-    } catch (e: any) {
-      if (String(e?.message || "").includes("index")) {
-        alert("Riwayat butuh Firestore index: sales → outlet(ASC), time(DESC)\n\n" + e.message);
-      } else {
-        alert("Gagal memuat riwayat: " + (e?.message || e));
-      }
-    } finally { setHistoryLoading(false); }
+      setHistoryRows(prev=> next? [...prev, ...rows] : rows);
+      setHistCursor(snap.docs.length? snap.docs[snap.docs.length-1] : null);
+    }catch(e:any){
+      alert("Gagal memuat riwayat: "+(e?.message||e));
+    }finally{
+      setHistoryLoading(false);
+    }
   }
 
   async function deleteSale(id: string) {
-    if (!isOwner) return alert("Akses owner saja.");
-    if (!confirm("Hapus transaksi ini?")) return;
+    if (!isOwner) return alert("Hanya owner yang dapat menghapus transaksi.");
+    if (!window.confirm("Hapus transaksi ini?")) return;
     await deleteDoc(doc(db, "sales", id));
     setHistoryRows(prev => prev.filter(x => x.id !== id));
   }
 
   /* ==========================
-     DASHBOARD OWNER
+     DASHBOARD
   =========================== */
-  async function loadDashboard() {
-    if (!isOwner) return;
+  async function loadDashboard(){
     setDashLoading(true);
-    try {
-      // Hari ini
+    try{
+      // Today
       const qToday = query(
-        collection(db, "sales"),
-        where("outlet", "==", OUTLET),
+        collection(db,"sales"),
+        where("outlet","==",OUTLET),
         where("time", ">=", Timestamp.fromDate(startOfDay())),
-        where("time", "<=", Timestamp.fromDate(endOfDay())),
-        orderBy("time", "desc")
+        where("time", "<=", Timestamp.fromDate(endOfDay()))
       );
       const sToday = await getDocs(qToday);
-      let omzet = 0, trx = 0, cashSum = 0, ew = 0, qr = 0;
-      const counter = new Map<string, number>();
-      sToday.docs.forEach(d => {
+      let omzet=0, trx=0, cashSum=0, ew=0, qr=0;
+      const counter: Record<string, number> = {};
+      sToday.forEach(d=>{
         const x = d.data() as any;
-        omzet += x.total || 0; trx += 1;
-        if (x.payMethod === "cash") cashSum += x.total || 0;
-        if (x.payMethod === "ewallet") ew += x.total || 0;
-        if (x.payMethod === "qris") qr += x.total || 0;
-        (x.items || []).forEach((it: any) => {
-          counter.set(it.name, (counter.get(it.name) || 0) + (it.qty || 0));
+        omzet += x.total||0; trx += 1;
+        if(x.payMethod==="cash") cashSum += x.total||0;
+        if(x.payMethod==="ewallet") ew += x.total||0;
+        if(x.payMethod==="qris") qr += x.total||0;
+        (x.items||[]).forEach((it:any)=>{
+          counter[it.name] = (counter[it.name]||0) + (it.qty||0);
         });
       });
-      const avg = trx ? Math.round(omzet / trx) : 0;
-      const topItems = Array.from(counter.entries())
-        .map(([name, qty]) => ({ name, qty }))
-        .sort((a, b) => b.qty - a.qty)
-        .slice(0, 5);
+      const avg = trx? Math.round(omzet/trx) : 0;
+      const topItems = Object.entries(counter)
+        .map(([name,qty])=>({name,qty}))
+        .sort((a,b)=>b.qty-a.qty)
+        .slice(0,5);
+      setTodayStats({ omzet, trx, avg, cash:cashSum, ewallet:ew, qris:qr, topItems });
 
-      setTodayStats({ omzet, trx, avg, cash: cashSum, ewallet: ew, qris: qr, topItems });
-
-      // 7 hari terakhir
-      const from7 = startOfDay(daysAgo(6));
-      const q7 = query(
-        collection(db, "sales"),
-        where("outlet", "==", OUTLET),
-        where("time", ">=", Timestamp.fromDate(from7)),
-        where("time", "<=", Timestamp.fromDate(endOfDay())),
-        orderBy("time", "asc")
-      );
-      const s7 = await getDocs(q7);
-      const bucket = new Map<string, { omzet: number; trx: number }>();
-      for (let i = 6; i >= 0; i--) {
-        const d = startOfDay(daysAgo(i)); const key = d.toISOString().slice(0, 10);
-        bucket.set(key, { omzet: 0, trx: 0 });
+      // last 7 days
+      const arr: {date:string; omzet:number; trx:number}[] = [];
+      for(let i=6;i>=0;i--){
+        const start = Timestamp.fromDate(startOfDay(daysAgo(i)));
+        const end = Timestamp.fromDate(endOfDay(daysAgo(i)));
+        const qs = query(
+          collection(db,"sales"),
+          where("outlet","==",OUTLET),
+          where("time",">=",start),
+          where("time","<=",end)
+        );
+        const sn = await getDocs(qs);
+        let o=0,t=0;
+        sn.forEach(d=>{ const x=d.data() as any; o+=x.total||0; t++; });
+        arr.push({date: daysAgo(i).toLocaleDateString("id-ID",{weekday:"short"}), omzet:o, trx:t});
       }
-      s7.docs.forEach(d => {
-        const x = d.data() as any;
-        const dt = x.time?.toDate?.() || new Date();
-        const key = new Date(dt).toISOString().slice(0, 10);
-        if (!bucket.has(key)) bucket.set(key, { omzet: 0, trx: 0 });
-        const cur = bucket.get(key)!;
-        cur.omzet += x.total || 0; cur.trx += 1;
-      });
-      const arr = Array.from(bucket.entries()).map(([date, v]) => ({ date, ...v }));
       setLast7(arr);
-    } finally {
-      setDashLoading(false);
-    }
+    }catch(e){ console.error(e); }
+    setDashLoading(false);
   }
 
   /* ==========================
-     OWNER: PRODUCTS & INVENTORY & RECIPES
+     (UI render + modals & PublicOrder ada di Part 3 & 4)
   =========================== */
-  async function upsertProduct(p: Partial<Product> & { id?: string }) {
-    if (!isOwner) return alert("Akses khusus owner.");
-    const id = p.id || uid();
-    await setDoc(doc(db, "products", id), {
-      outlet: OUTLET, name: p.name || "Produk", price: Number(p.price) || 0,
-      category: p.category || "Signature", active: p.active !== false,
-      image: (p as any).image || null
-    }, { merge: true });
-  }
-  async function deactivateProduct(id: string) {
-    if (!isOwner) return alert("Akses khusus owner.");
-    await updateDoc(doc(db, "products", id), { active: false });
-  }
-  async function deleteProduct(id: string) {
-    if (!isOwner) return alert("Akses khusus owner.");
-    if (!confirm("Hapus produk ini?")) return;
-    await deleteDoc(doc(db, "products", id));
-  }
-  async function upsertIngredient(i: Partial<Ingredient> & { id?: string }) {
-    if (!isOwner) return alert("Akses khusus owner.");
-    const id = i.id || uid();
-    await setDoc(doc(db, "ingredients", id), {
-      outlet: OUTLET, name: i.name || "Bahan", unit: i.unit || "pcs",
-      stock: Number(i.stock) || 0, min: Number(i.min) || 0
-    }, { merge: true });
-  }
-  async function deleteIngredient(id: string) {
-    if (!isOwner) return alert("Akses khusus owner.");
-    if (!confirm("Hapus bahan ini?")) return;
-    await deleteDoc(doc(db, "ingredients", id));
-  }
 
-  async function openRecipeEditor(productId: string) {
-    setRecipeOf(productId);
-    // load from firestore
-    const r = await getDoc(doc(db, "recipes", productId));
-    if (r.exists()) {
-      const data = r.data() as RecipeDoc;
-      setRecipeItems(Array.isArray(data.items) ? data.items : []);
-    } else {
-      setRecipeItems([]);
-    }
-    setTab("recipes");
-  }
-  async function saveRecipe() {
-    if (!recipeOf) return;
-    const clean = recipeItems.filter(it => it.ingredientId && it.qty > 0);
-    await setDoc(doc(db, "recipes", recipeOf), { items: clean }, { merge: true });
-    alert("Resep tersimpan.");
-  }
-  function addRecipeRow() {
-    setRecipeItems(prev => [...prev, { ingredientId: ingredients[0]?.id || "", qty: 1 }]);
-  }
-  function updateRecipeRow(i: number, field: "ingredientId" | "qty", val: string) {
-    setRecipeItems(prev => prev.map((r, idx) => idx === i ? { ...r, [field]: field === "qty" ? Number(val) || 0 : val } : r));
-  }
-  function removeRecipeRow(i: number) {
-    setRecipeItems(prev => prev.filter((_, idx) => idx !== i));
-  }
+  // sementara export state & funcs ke scope global optional (debug)
+  // (tidak wajib)
+  // @ts-ignore
+  window.__NamiPOS = { setTab, loadHistory, loadDashboard };
 
-  /* ==========================
-     UI — PUBLIC ORDER
+  // Part 3 akan mulai dari blok UI render (login/topbar/pos/history/dll)
+} ya
+/* ==========================
+     UI RENDER (login, header, POS, history, products, inventory)
   =========================== */
-  if (isPublicOrder) {
-    return <PublicOrder />;
-  }
 
-  /* ==========================
-     UI — LOGIN
-  =========================== */
-  // --- Public Order Router (ADD) ---
-const isPublicOrder = typeof window !== "undefined" && window.location.pathname.startsWith("/order");
-const outletFromUrl = isPublicOrder ? (getQueryParam("outlet") || OUTLET) : OUTLET;
-
-if (isPublicOrder) {
-  return <PublicOrder outlet={outletFromUrl} />;
-}
-
-// --- Auth guard (tetap) ---
-if (!user) {
-  return ( /* layar login seperti sudah ada */ );
-}
+  // LOGIN SCREEN
+  if (!user) {
+    return (
       <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-6 border">
           <div className="flex items-center gap-3 mb-4">
-            <img src={LOGO_SRC} alt="logo" className="h-10 w-10 rounded-2xl object-contain" />
+            <img src={BRAND_LOGO} alt="Logo" className="h-10 w-10 rounded-2xl object-cover"/>
             <div>
-              <h1 className="text-2xl font-bold">{APP_NAME} — POS</h1>
+              <h1 className="text-2xl font-bold">NamiPOS</h1>
               <p className="text-xs text-neutral-500">@{OUTLET}</p>
             </div>
           </div>
           <form onSubmit={doLogin} className="space-y-3">
-            <input className="w-full border rounded-lg p-3" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
-            <input className="w-full border rounded-lg p-3" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} />
-            <button disabled={authLoading} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg p-3">{authLoading ? "Masuk..." : "Masuk"}</button>
+            <input className="w-full border rounded-lg p-3" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} />
+            <input className="w-full border rounded-lg p-3" type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} />
+            <button disabled={authLoading} className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg p-3">
+              {authLoading?"Masuk...":"Masuk"}
+            </button>
           </form>
-          <p className="text-xs text-neutral-500 mt-3">Hanya staf & owner yang diizinkan.</p>
+          <p className="text-xs text-neutral-500 mt-3 text-center">Modern Ritual, Hembusan Ketenangan 🍵</p>
         </div>
       </div>
     );
   }
 
-  /* ==========================
-     UI — APP
-  =========================== */
   return (
     <div className="min-h-screen bg-neutral-50">
       {/* Topbar */}
       <header className="sticky top-0 z-30 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src={LOGO_SRC} alt="logo" className="h-8 w-8 rounded-xl object-contain" />
+            <img src={BRAND_LOGO} alt="Logo" className="h-8 w-8 rounded-xl object-cover"/>
             <div>
-              <div className="font-bold">{APP_NAME} — {OUTLET}</div>
-              <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner ? " · owner" : " · staff"}</div>
+              <div className="font-bold">NamiPOS — {OUTLET}</div>
+              <div className="text-[11px] text-neutral-500">Masuk: {user.email}{isOwner?" · owner":" · staff"}</div>
             </div>
           </div>
           <nav className="flex gap-2">
-            {isOwner && <button onClick={() => { setTab("dashboard"); loadDashboard(); }} className={`px-3 py-1.5 rounded-lg border ${tab === "dashboard" ? "bg-emerald-50 border-emerald-200" : "bg-white"}`}>Dashboard</button>}
-            <button onClick={() => setTab("pos")} className={`px-3 py-1.5 rounded-lg border ${tab === "pos" ? "bg-emerald-50 border-emerald-200" : "bg-white"}`}>Kasir</button>
-            <button onClick={() => { setTab("history"); loadHistory(false); }} className={`px-3 py-1.5 rounded-lg border ${tab === "history" ? "bg-emerald-50 border-emerald-200" : "bg-white"}`}>Riwayat</button>
-            {isOwner && <button onClick={() => setTab("products")} className={`px-3 py-1.5 rounded-lg border ${tab === "products" ? "bg-emerald-50 border-emerald-200" : "bg-white"}`}>Produk</button>}
-            {isOwner && <button onClick={() => setTab("inventory")} className={`px-3 py-1.5 rounded-lg border ${tab === "inventory" ? "bg-emerald-50 border-emerald-200" : "bg-white"}`}>Inventori</button>}
-            {isOwner && <button onClick={() => setTab("recipes")} className={`px-3 py-1.5 rounded-lg border ${tab === "recipes" ? "bg-emerald-50 border-emerald-200" : "bg-white"}`}>Resep</button>}
+            {isOwner && (
+              <button
+                onClick={()=>{ setTab("dashboard"); loadDashboard(); }}
+                className={`px-3 py-1.5 rounded-lg border ${tab==="dashboard"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+                Dashboard
+              </button>
+            )}
+            <button
+              onClick={()=>setTab("pos")}
+              className={`px-3 py-1.5 rounded-lg border ${tab==="pos"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+              Kasir
+            </button>
+            <button
+              onClick={()=>{ setTab("history"); loadHistory(false); }}
+              className={`px-3 py-1.5 rounded-lg border ${tab==="history"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+              Riwayat
+            </button>
+            {isOwner && (
+              <button
+                onClick={()=>setTab("products")}
+                className={`px-3 py-1.5 rounded-lg border ${tab==="products"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+                Produk
+              </button>
+            )}
+            {isOwner && (
+              <button
+                onClick={()=>setTab("inventory")}
+                className={`px-3 py-1.5 rounded-lg border ${tab==="inventory"?"bg-emerald-50 border-emerald-200":"bg-white"}`}>
+                Inventori
+              </button>
+            )}
             <button onClick={doLogout} className="px-3 py-1.5 rounded-lg border bg-rose-50">Keluar</button>
           </nav>
         </div>
@@ -730,24 +607,35 @@ if (!user) {
         <div className="mb-3">
           <div className="inline-flex items-center gap-2 text-xs px-3 py-1 rounded-full border bg-white">
             {activeShift?.isOpen
-              ? <>Shift <b>OPEN</b> • {new Date(activeShift.openAt?.toDate?.() || new Date()).toLocaleTimeString("id-ID", { hour12: false })} • {activeShift.openBy}</>
+              ? <>Shift <b>OPEN</b> • {new Date(activeShift.openAt?.toDate?.() || new Date()).toLocaleTimeString("id-ID",{hour12:false})} • {activeShift.openBy}</>
               : <>Belum ada shift aktif</>}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             {!activeShift?.isOpen ? (
               <>
-                <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Kas awal (Rp)" value={openCash} onChange={e => setOpenCash(Number(e.target.value) || 0)} />
-                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>Buka Shift</button>
+                <input
+                  type="number"
+                  className="border rounded-lg px-3 py-2 w-40"
+                  placeholder="Kas awal (Rp)"
+                  value={openCash}
+                  onChange={e=>setOpenCash(Number(e.target.value)||0)}
+                />
+                <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={openShiftAction}>
+                  Buka Shift
+                </button>
               </>
             ) : (
-              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>Tutup Shift</button>
+              <button className="px-3 py-2 rounded-lg bg-rose-600 text-white" onClick={closeShiftAction}>
+                Tutup Shift
+              </button>
             )}
           </div>
         </div>
 
         {/* DASHBOARD */}
-        {tab === "dashboard" && isOwner && (
+        {tab==="dashboard" && isOwner && (
           <section className="space-y-4">
+            {/* KPIs */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <KPI title="Omzet Hari Ini" value={IDR(todayStats.omzet)} />
               <KPI title="Transaksi" value={String(todayStats.trx)} />
@@ -755,15 +643,24 @@ if (!user) {
               <KPI title="Cash" value={IDR(todayStats.cash)} />
               <KPI title="eWallet/QRIS" value={IDR(todayStats.ewallet + todayStats.qris)} />
             </div>
+
+            {/* Top items + 7-day trend */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="bg-white border rounded-2xl p-4">
                 <div className="font-semibold mb-2">5 Menu Terlaris (Hari Ini)</div>
                 <table className="w-full text-sm">
-                  <thead><tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr></thead>
+                  <thead>
+                    <tr className="border-b text-left"><th className="py-2">Menu</th><th className="text-right">Qty</th></tr>
+                  </thead>
                   <tbody>
-                    {todayStats.topItems.length === 0 && <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>}
-                    {todayStats.topItems.map((t, i) => (
-                      <tr key={i} className="border-b"><td className="py-2">{t.name}</td><td className="text-right">{t.qty}</td></tr>
+                    {todayStats.topItems.length===0 && (
+                      <tr><td className="py-2 text-neutral-500" colSpan={2}>Belum ada data.</td></tr>
+                    )}
+                    {todayStats.topItems.map((t,i)=>(
+                      <tr key={i} className="border-b">
+                        <td className="py-2">{t.name}</td>
+                        <td className="text-right">{t.qty}</td>
+                      </tr>
                     ))}
                   </tbody>
                 </table>
@@ -773,11 +670,13 @@ if (!user) {
                 <div className="font-semibold mb-2">7 Hari Terakhir</div>
                 <div className="space-y-1">
                   {dashLoading && <div className="text-sm text-neutral-500">Memuat…</div>}
-                  {!dashLoading && last7.map((d) => (
+                  {!dashLoading && last7.map((d)=>(
                     <div key={d.date} className="flex items-center gap-3">
                       <div className="w-24 text-xs text-neutral-600">{d.date}</div>
                       <div className="flex-1 h-2 rounded bg-neutral-100 overflow-hidden">
-                        <div className="h-2 rounded bg-emerald-500" style={{ width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x => x.omzet))))) * 100}%` }} />
+                        <div
+                          className="h-2 rounded bg-emerald-500"
+                          style={{width: `${Math.min(100, (d.omzet / Math.max(1, Math.max(...last7.map(x=>x.omzet))))) * 100}%`}} />
                       </div>
                       <div className="w-28 text-right text-xs">{IDR(d.omzet)}</div>
                       <div className="w-10 text-right text-xs">{d.trx}</div>
@@ -790,21 +689,34 @@ if (!user) {
         )}
 
         {/* POS */}
-        {tab === "pos" && (
+        {tab==="pos" && (
           <section className="grid grid-cols-1 md:grid-cols-12 gap-4">
             {/* Products */}
             <div className="md:col-span-7">
               <div className="bg-white rounded-2xl border p-3 mb-2">
-                <input className="border rounded-lg px-3 py-2 w-full" placeholder="Cari menu…" value={queryText} onChange={e => setQueryText(e.target.value)} />
+                <input
+                  className="border rounded-lg px-3 py-2 w-full"
+                  placeholder="Cari menu…"
+                  value={queryText}
+                  onChange={e=>setQueryText(e.target.value)}
+                />
               </div>
+
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-                {filteredProducts.map(p => (
-                  <button key={p.id} onClick={() => addToCart(p)} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
+                {filteredProducts.map(p=>(
+                  <button
+                    key={p.id}
+                    onClick={()=>setCart(prev=>{
+                      const same = prev.find(ci=> ci.productId===p.id && (ci.note||"")===(noteInput||""));
+                      if(same) return prev.map(ci=> ci===same? {...ci, qty:ci.qty+1 } : ci);
+                      return [...prev, { id: uid(), productId:p.id, name:p.name, price:p.price, qty:1, note: noteInput||undefined }];
+                    })}
+                    className="bg-white rounded-2xl border p-3 text-left hover:shadow">
                     <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
-                      {p.image ? <img src={p.image} alt={p.name} className="w-full h-full object-cover" /> : null}
+                      {p.imageUrl ? <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/> : null}
                     </div>
                     <div className="font-medium leading-tight">{p.name}</div>
-                    <div className="text-xs text-neutral-500">{p.category || "Signature"}</div>
+                    <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
                     <div className="font-semibold mt-1">{IDR(p.price)}</div>
                   </button>
                 ))}
@@ -816,27 +728,37 @@ if (!user) {
               <div className="bg-white rounded-2xl border p-3">
                 {/* Customer */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
-                  <input className="border rounded-lg px-3 py-2" placeholder="No HP pelanggan" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} />
-                  <input className="border rounded-lg px-3 py-2" placeholder="Nama pelanggan (baru)" value={customerName} onChange={e => setCustomerName(e.target.value)} />
+                  <input className="border rounded-lg px-3 py-2" placeholder="No HP pelanggan" value={customerPhone} onChange={e=>setCustomerPhone(e.target.value)} />
+                  <input className="border rounded-lg px-3 py-2" placeholder="Nama pelanggan (baru)" value={customerName} onChange={e=>setCustomerName(e.target.value)} />
                 </div>
                 {!!customerPhone && (
                   <div className="text-xs text-neutral-600 mb-2">
-                    {customerPoints === null ? "Mencari pelanggan…" :
-                      customerPoints === 0 && !customerName ? "Belum terdaftar — isi nama untuk dibuat otomatis saat transaksi." :
-                        <>Poin: <b>{customerPoints}</b> {customerName ? `— ${customerName}` : ""}</>}
+                    {customerPoints===null ? "Mencari pelanggan…" :
+                      customerPoints===0 && !customerName ? "Belum terdaftar — isi nama untuk dibuat otomatis saat transaksi." :
+                      <>Poin: <b>{customerPoints}</b> {customerName?`— ${customerName}`:""}</>}
                   </div>
                 )}
-
-                <div className="flex items-center gap-2 mb-2">
-                  <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={noteInput} onChange={e => setNoteInput(e.target.value)} />
-                  <button className="px-3 py-2 rounded-lg border" onClick={() => setNoteInput("")}>Clear</button>
+                <div className="mb-2">
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={useFreeDrink}
+                      onChange={e=>setUseFreeDrink(e.target.checked)}
+                      disabled={!customerPoints || customerPoints<FREE_DRINK_POINTS}/>
+                    Tukar {FREE_DRINK_POINTS} poin untuk 1 minuman gratis
+                  </label>
                 </div>
 
-                {cart.length === 0 ? (
+                <div className="flex items-center gap-2 mb-2">
+                  <input className="border rounded-lg px-3 py-2 flex-1" placeholder="Catatan item (less sugar / no ice)" value={noteInput} onChange={e=>setNoteInput(e.target.value)} />
+                  <button className="px-3 py-2 rounded-lg border" onClick={()=>setNoteInput("")}>Clear</button>
+                </div>
+
+                {cart.length===0 ? (
                   <div className="text-sm text-neutral-500">Belum ada item. Klik menu untuk menambahkan.</div>
                 ) : (
                   <div className="space-y-2">
-                    {cart.map(ci => (
+                    {cart.map(ci=>(
                       <div key={ci.id} className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2">
                         <div className="col-span-6">
                           <div className="font-medium leading-tight">{ci.name}</div>
@@ -844,12 +766,12 @@ if (!user) {
                         </div>
                         <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
                         <div className="col-span-3 flex items-center justify-end gap-2">
-                          <button className="px-2 py-1 border rounded" onClick={() => dec(ci.id)}>-</button>
+                          <button className="px-2 py-1 border rounded" onClick={()=>setCart(prev=>prev.map(x=>x.id===ci.id?{...x, qty:Math.max(1,x.qty-1)}:x))}>-</button>
                           <div className="w-8 text-center font-medium">{ci.qty}</div>
-                          <button className="px-2 py-1 border rounded" onClick={() => inc(ci.id)}>+</button>
+                          <button className="px-2 py-1 border rounded" onClick={()=>setCart(prev=>prev.map(x=>x.id===ci.id?{...x, qty:x.qty+1}:x))}>+</button>
                         </div>
                         <div className="col-span-1 text-right">
-                          <button className="px-2 py-1 rounded border" onClick={() => rm(ci.id)}>x</button>
+                          <button className="px-2 py-1 rounded border" onClick={()=>setCart(prev=>prev.filter(x=>x.id!==ci.id))}>x</button>
                         </div>
                       </div>
                     ))}
@@ -862,17 +784,18 @@ if (!user) {
                   <div className="grid grid-cols-2 gap-2">
                     <label className="flex items-center gap-2 text-sm">
                       <span className="w-20">Pajak %</span>
-                      <input type="number" className="border rounded-lg px-2 py-1 w-24" value={taxPct} onChange={e => setTaxPct(Number(e.target.value) || 0)} />
+                      <input type="number" className="border rounded-lg px-2 py-1 w-24" value={taxPct} onChange={e=>setTaxPct(Number(e.target.value)||0)} />
                     </label>
                     <label className="flex items-center gap-2 text-sm">
                       <span className="w-20">Service %</span>
-                      <input type="number" className="border rounded-lg px-2 py-1 w-24" value={svcPct} onChange={e => setSvcPct(Number(e.target.value) || 0)} />
+                      <input type="number" className="border rounded-lg px-2 py-1 w-24" value={svcPct} onChange={e=>setSvcPct(Number(e.target.value)||0)} />
                     </label>
                   </div>
                   <label className="flex items-center justify-between text-sm">
                     <span>Diskon (Rp)</span>
-                    <input type="number" className="border rounded-lg px-2 py-1 w-28" value={discount} onChange={e => setDiscount(Number(e.target.value) || 0)} />
+                    <input type="number" className="border rounded-lg px-2 py-1 w-28" value={discount} onChange={e=>setDiscount(Number(e.target.value)||0)} />
                   </label>
+                  {useFreeDrink && <div className="text-xs text-emerald-600">Tukar poin: -{IDR(loyaltyDiscount)}</div>}
                   <div className="flex items-center justify-between text-lg font-semibold">
                     <span>Total</span><span>{IDR(total)}</span>
                   </div>
@@ -880,21 +803,27 @@ if (!user) {
 
                 {/* payment */}
                 <div className="grid grid-cols-1 gap-2 mb-2">
-                  <select className="border rounded-lg px-3 py-2" value={payMethod} onChange={e => setPayMethod(e.target.value as any)}>
+                  <select className="border rounded-lg px-3 py-2" value={payMethod} onChange={e=>setPayMethod(e.target.value as any)}>
                     <option value="cash">Cash</option>
-                    <option value="ewallet">eWallet / QRIS</option>
-                    <option value="qris">QRIS Static</option>
+                    <option value="ewallet">eWallet</option>
+                    <option value="qris">QRIS</option>
                   </select>
-                  {payMethod === "cash" && (
+                  {payMethod==="cash" && (
                     <div className="flex items-center gap-2">
-                      <input type="number" className="border rounded-lg px-3 py-2 w-40" placeholder="Tunai diterima" value={cash} onChange={e => setCash(Number(e.target.value) || 0)} />
-                      <div className="text-sm">Kembali: <b>{IDR(change)}</b></div>
+                      <input
+                        type="number"
+                        className="border rounded-lg px-3 py-2 w-40"
+                        placeholder="Tunai diterima"
+                        value={cash}
+                        onChange={e=>setCash(Number(e.target.value)||0)}
+                      />
+                      <div className="text-sm">Kembali: <b>{IDR(Math.max(0,(cash||0)-total))}</b></div>
                     </div>
                   )}
-                  {(payMethod === "ewallet" || payMethod === "qris") && (
+                  {payMethod==="qris" && (
                     <div className="border rounded-xl p-2 bg-emerald-50">
                       <div className="text-sm mb-1">Scan untuk bayar:</div>
-                      <img src={QRIS_IMG_SRC} alt="QRIS" className="w-40" onClick={() => setShowQR(true)} />
+                      <img src={QRIS_IMG_SRC} alt="QRIS" className="w-40" onClick={()=>setShowQR(true)} />
                       <div className="text-xs text-neutral-500 mt-1">* Setelah sukses, tekan “Selesai & Cetak”.</div>
                     </div>
                   )}
@@ -902,14 +831,22 @@ if (!user) {
 
                 {/* actions */}
                 <div className="flex justify-between gap-2">
-                  <button className="px-3 py-2 rounded-lg border" onClick={clearCart}>Bersihkan</button>
+                  <button
+                    className="px-3 py-2 rounded-lg border"
+                    onClick={()=>{
+                      setCart([]); setDiscount(0); setTaxPct(0); setSvcPct(0); setCash(0);
+                      setCustomerPhone(""); setCustomerName(""); setCustomerPoints(null); setUseFreeDrink(false);
+                    }}>
+                    Bersihkan
+                  </button>
                   <div className="flex gap-2">
-                    <button className="px-3 py-2 rounded-lg border" disabled={cart.length === 0} onClick={() => printReceipt({
-                      outlet: OUTLET, shiftId: activeShift?.id || null, cashierEmail: user.email, customerPhone: customerPhone || null, customerName,
-                      time: null, items: cart.map(i => ({ name: i.name, price: i.price, qty: i.qty, ...(i.note ? { note: i.note } : {}) })),
-                      subtotal, discount, tax: taxVal, service: svcVal, total, payMethod, cash, change
-                    })}>Print Draf</button>
-                    <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50" disabled={cart.length === 0} onClick={finalize}>Selesai & Cetak</button>
+                    <button className="px-3 py-2 rounded-lg border" disabled={cart.length===0} onClick={printReceipt}>Print Draf</button>
+                    <button
+                      className="px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
+                      disabled={cart.length===0}
+                      onClick={finalizeSale}>
+                      Selesai & Cetak
+                    </button>
                   </div>
                 </div>
               </div>
@@ -918,179 +855,257 @@ if (!user) {
         )}
 
         {/* HISTORY */}
-        {tab === "history" && (
+        {tab==="history" && (
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Riwayat Transaksi</h2>
               <div className="flex gap-2">
-                <button className="px-3 py-2 rounded-lg border" onClick={() => loadHistory(false)} disabled={historyLoading}>Muat Ulang</button>
-                <button className="px-3 py-2 rounded-lg border" onClick={() => loadHistory(true)} disabled={historyLoading || !histCursor}>Muat Lagi</button>
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>loadHistory(false)} disabled={historyLoading}>Muat Ulang</button>
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>loadHistory(true)} disabled={historyLoading || !histCursor}>Muat Lagi</button>
               </div>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b">
-                  <th className="py-2">Waktu</th><th>Kasir</th><th>Pelanggan</th><th>Item</th><th className="text-right">Total</th><th className="text-right">Aksi</th>
-                </tr></thead>
+                <thead>
+                  <tr className="text-left border-b">
+                    <th className="py-2">Waktu</th>
+                    <th>Kasir</th>
+                    <th>Pelanggan</th>
+                    <th>Item</th>
+                    <th className="text-right">Total</th>
+                    <th>Aksi</th>
+                  </tr>
+                </thead>
                 <tbody>
-                  {historyRows.map(s => (
+                  {historyRows.map(s=>(
                     <tr key={s.id} className="border-b hover:bg-emerald-50/40">
-                      <td className="py-2">{s.time ? new Date(s.time.toDate()).toLocaleString("id-ID", { hour12: false }) : "-"}</td>
+                      <td className="py-2">{s.time? new Date(s.time.toDate()).toLocaleString("id-ID",{hour12:false}) : "-"}</td>
                       <td>{s.cashierEmail}</td>
                       <td>{s.customerPhone || "-"}</td>
-                      <td className="truncate">{s.items.map(i => `${i.name}x${i.qty}`).join(", ")}</td>
+                      <td className="truncate">{s.items.map(i=>`${i.name}x${i.qty}`).join(", ")}</td>
                       <td className="text-right font-medium">{IDR(s.total)}</td>
                       <td className="text-right">
-                        {isOwner && <button className="px-2 py-1 border rounded" onClick={() => s.id && deleteSale(s.id)}>Hapus</button>}
+                        {isOwner && <button className="px-2 py-1 border rounded" onClick={()=> s.id && deleteSale(s.id!)}>Hapus</button>}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {historyRows.length === 0 && <div className="text-sm text-neutral-500">Belum ada transaksi.</div>}
+              {historyRows.length===0 && <div className="text-sm text-neutral-500">Belum ada transaksi.</div>}
             </div>
           </section>
         )}
 
         {/* PRODUCTS */}
-        {tab === "products" && isOwner && (
+        {tab==="products" && isOwner && (
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Manajemen Produk</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={() => upsertProduct({ name: "Produk Baru", price: 10000, category: "Signature", active: true })}>+ Tambah</button>
+              <button className="px-3 py-2 rounded-lg border" onClick={()=>{ setShowProdModal(true); setProdForm({ id: undefined, name:"", price:0, imageUrl:"", category:"Signature", active:true }); }}>
+                + Tambah
+              </button>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th>Gambar</th><th className="text-right">Aksi</th></tr></thead>
+                <thead>
+                  <tr className="text-left border-b"><th>Nama</th><th>Kategori</th><th className="text-right">Harga</th><th className="text-right">Aksi</th></tr>
+                </thead>
                 <tbody>
-                  {products.map(p => (
+                  {products.map(p=>(
                     <tr key={p.id} className="border-b">
-                      <td className="py-2">
-                        <input className="border rounded px-2 py-1 w-44" defaultValue={p.name} onBlur={e => upsertProduct({ id: p.id, name: e.target.value, price: p.price, category: p.category, active: p.active, image: p.image || null })} />
-                      </td>
-                      <td>
-                        <input className="border rounded px-2 py-1 w-36" defaultValue={p.category || ""} onBlur={e => upsertProduct({ id: p.id, name: p.name, price: p.price, category: e.target.value, active: p.active, image: p.image || null })} />
-                      </td>
-                      <td className="text-right">
-                        <input type="number" className="border rounded px-2 py-1 w-28 text-right" defaultValue={p.price} onBlur={e => upsertProduct({ id: p.id, name: p.name, price: Number(e.target.value) || 0, category: p.category, active: p.active, image: p.image || null })} />
-                      </td>
-                      <td>
-                        <input className="border rounded px-2 py-1 w-56" placeholder="URL gambar" defaultValue={p.image || ""} onBlur={e => upsertProduct({ id: p.id, image: e.target.value, name: p.name, price: p.price, category: p.category, active: p.active })} />
-                      </td>
-                      <td className="text-right">
-                        <div className="flex gap-2 justify-end">
-                          <button className="px-2 py-1 border rounded" onClick={() => upsertProduct({ id: p.id, active: !(p.active === false), name: p.name, price: p.price, category: p.category, image: p.image || null })}>
-                            {p.active === false ? "Aktifkan" : "Nonaktifkan"}
-                          </button>
-                          <button className="px-2 py-1 border rounded" onClick={() => openRecipeEditor(p.id)}>Resep</button>
-                          <button className="px-2 py-1 border rounded" onClick={() => deleteProduct(p.id)}>Hapus</button>
-                        </div>
+                      <td className="py-2">{p.name}</td>
+                      <td>{p.category||"-"}</td>
+                      <td className="text-right">{IDR(p.price)}</td>
+                      <td className="text-right space-x-2">
+                        <button className="px-2 py-1 border rounded" onClick={()=>{ setProdForm({...p}); setShowProdModal(true); }}>Edit</button>
+                        <button className="px-2 py-1 border rounded" onClick={()=>{ setRecipeProduct(p); setRecipeRows(recipes[p.id]||[]); setShowRecipeModal(true); }}>Resep</button>
+                        <button className="px-2 py-1 border rounded" onClick={async ()=>{
+                          await updateDoc(doc(db,"products", p.id), { active: !(p.active!==false) });
+                        }}>{p.active!==false?"Nonaktif":"Aktifkan"}</button>
+                        <button className="px-2 py-1 border rounded text-rose-600" onClick={async ()=>{
+                          if(!confirm("Hapus produk ini permanen?")) return;
+                          await deleteDoc(doc(db,"products", p.id));
+                        }}>Hapus</button>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              {products.length === 0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
+              {products.length===0 && <div className="text-sm text-neutral-500">Belum ada produk.</div>}
             </div>
           </section>
         )}
 
         {/* INVENTORY */}
-        {tab === "inventory" && isOwner && (
+        {tab==="inventory" && isOwner && (
           <section className="bg-white rounded-2xl border p-3">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-lg font-semibold">Inventori</h2>
-              <button className="px-3 py-2 rounded-lg border" onClick={() => upsertIngredient({ name: "Bahan Baru", unit: "pcs", stock: 0, min: 0 })}>+ Tambah</button>
+              <div className="flex gap-2">
+                <button className="px-3 py-2 rounded-lg border" onClick={()=>{
+                  setIngForm({ id: undefined, name:"", unit:"pcs", stock:0, min:0 });
+                  setShowIngModal(true);
+                }}>+ Tambah</button>
+              </div>
             </div>
             <div className="overflow-auto">
               <table className="w-full text-sm">
-                <thead><tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Min</th><th className="text-right">Aksi</th></tr></thead>
+                <thead>
+                  <tr className="text-left border-b"><th>Nama</th><th>Satuan</th><th className="text-right">Stok</th><th className="text-right">Minimal</th><th className="text-right">Aksi</th></tr>
+                </thead>
                 <tbody>
-                  {ingredients.map(i => {
-                    const low = Number(i.stock) <= Number(i.min || 0);
-                    return (
-                      <tr key={i.id} className={`border-b ${low ? "bg-amber-50" : ""}`}>
-                        <td className="py-2">
-                          <input className="border rounded px-2 py-1 w-44" defaultValue={i.name} onBlur={e => upsertIngredient({ id: i.id, name: e.target.value, unit: i.unit, stock: i.stock, min: i.min })} />
-                        </td>
-                        <td>
-                          <input className="border rounded px-2 py-1 w-24" defaultValue={i.unit} onBlur={e => upsertIngredient({ id: i.id, name: i.name, unit: e.target.value, stock: i.stock, min: i.min })} />
-                        </td>
-                        <td className="text-right">
-                          <input type="number" className="border rounded px-2 py-1 w-24 text-right" defaultValue={i.stock} onBlur={e => upsertIngredient({ id: i.id, name: i.name, unit: i.unit, stock: Number(e.target.value) || 0, min: i.min })} />
-                        </td>
-                        <td className="text-right">
-                          <input type="number" className="border rounded px-2 py-1 w-24 text-right" defaultValue={i.min || 0} onBlur={e => upsertIngredient({ id: i.id, name: i.name, unit: i.unit, stock: i.stock, min: Number(e.target.value) || 0 })} />
-                        </td>
-                        <td className="text-right">
-                          <button className="px-2 py-1 border rounded" onClick={() => deleteIngredient(i.id)}>Hapus</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {ingredients.map(i=>(
+                    <tr key={i.id} className={`border-b ${i.min && i.stock<=i.min ? "bg-amber-50" : ""}`}>
+                      <td className="py-2">{i.name}</td>
+                      <td>{i.unit}</td>
+                      <td className="text-right">{i.stock}</td>
+                      <td className="text-right">{i.min||0}</td>
+                      <td className="text-right">
+                        <button className="px-2 py-1 border rounded mr-2" onClick={()=>{
+                          setIngForm({...i});
+                          setShowIngModal(true);
+                        }}>Edit</button>
+                        <button className="px-2 py-1 border rounded text-rose-600" onClick={async ()=>{
+                          if(!confirm("Hapus bahan ini permanen?")) return;
+                          await deleteDoc(doc(db,"ingredients", i.id));
+                        }}>Hapus</button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
-              {ingredients.length === 0 && (
+              {ingredients.length===0 && (
                 <div className="text-sm text-neutral-500">Belum ada data inventori.</div>
               )}
             </div>
           </section>
         )}
-
-        {/* RECIPES */}
-        {tab === "recipes" && isOwner && (
-          <section className="bg-white rounded-2xl border p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Resep Produk</h2>
-              {recipeOf && (
-                <div className="text-sm text-neutral-600">Product ID: <code className="bg-neutral-100 px-1 rounded">{recipeOf}</code></div>
-              )}
-            </div>
-            {!recipeOf ? (
-              <div className="text-sm text-neutral-500">
-                Pilih produk dari tab <b>Produk</b> lalu klik tombol <b>Resep</b>.
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <div className="flex gap-2">
-                  <button className="px-3 py-2 rounded-lg border" onClick={addRecipeRow}>+ Tambah baris</button>
-                  <button className="px-3 py-2 rounded-lg bg-emerald-600 text-white" onClick={saveRecipe}>Simpan Resep</button>
-                </div>
-                <div className="overflow-auto">
-                  <table className="w-full text-sm">
-                    <thead><tr className="text-left border-b"><th>Bahan</th><th className="text-right">Qty</th><th className="text-right">Aksi</th></tr></thead>
-                    <tbody>
-                      {recipeItems.length === 0 && (
-                        <tr><td colSpan={3} className="py-3 text-neutral-500">Belum ada baris — klik “Tambah baris”.</td></tr>
-                      )}
-                      {recipeItems.map((r, idx) => (
-                        <tr key={idx} className="border-b">
-                          <td className="py-2">
-                            <select className="border rounded px-2 py-1 w-56" value={r.ingredientId} onChange={e => updateRecipeRow(idx, "ingredientId", e.target.value)}>
-                              {ingredients.map(ing => <option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
-                            </select>
-                          </td>
-                          <td className="text-right">
-                            <input type="number" className="border rounded px-2 py-1 w-24 text-right" value={r.qty} onChange={e => updateRecipeRow(idx, "qty", e.target.value)} />
-                          </td>
-                          <td className="text-right">
-                            <button className="px-2 py-1 border rounded" onClick={() => removeRecipeRow(idx)}>Hapus</button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </section>
-        )}
       </main>
+
+      {/* === MODALS === */}
+
+      {/* Product Modal */}
+      {showProdModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowProdModal(false)}>
+          <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-2">{prodForm.id?"Edit Produk":"Tambah Produk"}</h3>
+            <div className="space-y-2">
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama" value={prodForm.name||""} onChange={e=>setProdForm({...prodForm, name:e.target.value})}/>
+              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Harga" value={prodForm.price||0} onChange={e=>setProdForm({...prodForm, price:Number(e.target.value)||0})}/>
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Kategori (opsional)" value={prodForm.category||""} onChange={e=>setProdForm({...prodForm, category:e.target.value})}/>
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="URL Gambar (opsional)" value={prodForm.imageUrl||""} onChange={e=>setProdForm({...prodForm, imageUrl:e.target.value})}/>
+              <label className="inline-flex items-center gap-2 text-sm">
+                <input type="checkbox" checked={prodForm.active!==false} onChange={e=>setProdForm({...prodForm, active:e.target.checked})}/>
+                Aktif
+              </label>
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button className="px-3 py-2 border rounded" onClick={()=>setShowProdModal(false)}>Batal</button>
+              <button
+                className="px-3 py-2 bg-emerald-600 text-white rounded"
+                onClick={async ()=>{
+                  if(!isOwner) return alert("Hanya owner.");
+                  if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
+                  const id = prodForm.id || uid();
+                  await setDoc(doc(db,"products",id), {
+                    outlet: OUTLET,
+                    name: prodForm.name,
+                    price: Number(prodForm.price||0),
+                    imageUrl: prodForm.imageUrl || "",
+                    category: prodForm.category || "Signature",
+                    active: prodForm.active!==false
+                  }, { merge:true });
+                  setShowProdModal(false);
+                }}>
+                Simpan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ingredient Modal */}
+      {showIngModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowIngModal(false)}>
+          <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-2">{ingForm.id?"Edit Bahan":"Tambah Bahan"}</h3>
+            <div className="space-y-2">
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Nama bahan" value={igFormSafe(ingForm.name)} onChange={e=>setIngForm({...ingForm, name:e.target.value})}/>
+              <input className="border rounded-lg px-3 py-2 w-full" placeholder="Satuan (ml, gr, pcs...)" value={igFormSafe(ingForm.unit,"pcs")} onChange={e=>setIngForm({...ingForm, unit:e.target.value})}/>
+              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Stok" value={Number(ingForm.stock||0)} onChange={e=>setIngForm({...ingForm, stock:Number(e.target.value)||0})}/>
+              <input type="number" className="border rounded-lg px-3 py-2 w-full" placeholder="Minimal stok (peringatan)" value={Number(ingForm.min||0)} onChange={e=>setIngForm({...ingForm, min:Number(e.target.value)||0})}/>
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button className="px-3 py-2 border rounded" onClick={()=>setShowIngModal(false)}>Batal</button>
+              <button
+                className="px-3 py-2 bg-emerald-600 text-white rounded"
+                onClick={async ()=>{
+                  if(!isOwner) return alert("Hanya owner.");
+                  if(!ingForm.name) return alert("Nama bahan wajib diisi.");
+                  const id = ingForm.id || uid();
+                  await setDoc(doc(db,"ingredients",id), {
+                    outlet: OUTLET,
+                    name: ingForm.name,
+                    unit: ingForm.unit||"pcs",
+                    stock: Number(ingForm.stock||0),
+                    min: Number(ingForm.min||0)
+                  }, { merge:true });
+                  setShowIngModal(false);
+                }}>
+                Simpan
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recipe Modal */}
+      {showRecipeModal && recipeProduct && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowRecipeModal(false)}>
+          <div className="bg-white rounded-2xl p-4 w-full max-w-lg" onClick={e=>e.stopPropagation()}>
+            <h3 className="font-semibold mb-2">Resep: {recipeProduct.name}</h3>
+            <div className="space-y-2">
+              {recipeRows.map((r,idx)=>(
+                <div key={idx} className="grid grid-cols-6 gap-2">
+                  <select
+                    className="col-span-4 border rounded-lg px-2 py-2"
+                    value={r.ingredientId}
+                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}
+                  >
+                    {ingredients.map(ing=><option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
+                  </select>
+                  <input
+                    type="number"
+                    className="col-span-1 border rounded-lg px-2 py-2"
+                    value={r.qty}
+                    onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}
+                  />
+                  <button className="col-span-1 border rounded" onClick={()=>setRecipeRows(prev=>prev.filter((_,i)=>i!==idx))}>x</button>
+                </div>
+              ))}
+              <button className="px-3 py-2 border rounded" onClick={()=>setRecipeRows(prev=>[...prev, {ingredientId: ingredients[0]?.id||"", qty:1}])}>+ Tambah baris</button>
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button className="px-3 py-2 border rounded" onClick={()=>setShowRecipeModal(false)}>Batal</button>
+              <button
+                className="px-3 py-2 bg-emerald-600 text-white rounded"
+                onClick={async ()=>{
+                  if(!isOwner) return alert("Hanya owner.");
+                  const clean = recipeRows.filter(r => r.ingredientId && r.qty>0);
+                  await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
+                  setShowRecipeModal(false);
+                }}>
+                Simpan Resep
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal QR */}
       {showQR && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setShowQR(false)}>
-          <div className="bg-white rounded-2xl p-4" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={()=>setShowQR(false)}>
+          <div className="bg-white rounded-2xl p-4" onClick={e=>e.stopPropagation()}>
             <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
             <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
           </div>
@@ -1098,378 +1113,174 @@ if (!user) {
       )}
     </div>
   );
+} // <- end of App()
+
+/* Small helpers for modal inputs (prevent uncontrolled->controlled glitches) */
+function igFormSafe<T extends string | number | undefined>(v: T, fallback: any = "") {
+  return (v===undefined || v===null) ? fallback : v;
 }
 
-/* ===== Small UI helpers ===== */
-function KPI({ title, value }: { title: string; value: string }) {
+/* Small KPI UI */
+function KPI({title, value}:{title:string; value:string}) {
   return (
-    <div className="bg-white border rounded-2xl p-4 shadow-sm">
+    <div className="bg-white border rounded-2xl p-4">
       <div className="text-[12px] text-neutral-500">{title}</div>
       <div className="text-xl font-bold mt-1">{value}</div>
     </div>
   );
 }
-/* ==========================
-   PUBLIC ORDER PAGE (ADD)
-========================== */
-function PublicOrder({ outlet }: { outlet: string }) {
-  const [products, setProducts] = React.useState<Product[]>([]);
-  const [q, setQ] = React.useState("");
-  const [cart, setCart] = React.useState<{ productId: string; name: string; price: number; qty: number }[]>([]);
-  const [custName, setCustName] = React.useState("");
-  const [custPhone, setCustPhone] = React.useState("");
-  const [custAddr, setCustAddr] = React.useState("");
-  const [note, setNote] = React.useState("");
-  const [distanceKm, setDistanceKm] = React.useState<number>(1);
-  const [pay, setPay] = React.useState<"qris" | "cod">("qris");
-  const [sending, setSending] = React.useState(false);
+/* ===========================================================
+   PUBLIC ORDER PAGE (tanpa login)
+   =========================================================== */
+//  -- penjelasan --
+//  URL:  https://namipos.vercel.app/order?outlet=MTHaryono
+//  pelanggan dapat memilih produk aktif, memasukkan nama, nomor HP, alamat, jarak, dan metode pembayaran (QRIS/COD)
 
-  // load produk aktif outlet
-  React.useEffect(() => {
-    const qProd = query(
-      collection(db, "products"),
-      where("outlet", "==", outlet),
-      where("active", "==", true)
-    );
-    const unsub = onSnapshot(qProd, (snap) => {
-      const rows: Product[] = snap.docs.map((d) => {
-        const x = d.data() as any;
-        return { id: d.id, name: x.name, price: x.price, category: x.category, active: x.active, outlet: x.outlet };
-      });
-      setProducts(rows);
-    });
-    return () => unsub();
-  }, [outlet]);
+import ReactDOM from "react-dom/client";
+import { useSearchParams } from "react-router-dom";
+import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
 
-  const filtered = React.useMemo(
-    () => products.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())),
-    [products, q]
-  );
+export function PublicOrder() {
+  const [params] = useSearchParams();
+  const outlet = params.get("outlet") || "MTHaryono";
+  const [loading, setLoading] = useState(true);
+  const [menu, setMenu] = useState<Product[]>([]);
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [custName, setCustName] = useState("");
+  const [custPhone, setCustPhone] = useState("");
+  const [custAddr, setCustAddr] = useState("");
+  const [distance, setDistance] = useState<number>(0);
+  const [method, setMethod] = useState<"qris"|"cod">("qris");
+  const [sending, setSending] = useState(false);
 
-  const addToCart = (p: Product) => {
-    setCart((prev) => {
-      const found = prev.find((i) => i.productId === p.id);
-      if (found) return prev.map((i) => (i.productId === p.id ? { ...i, qty: i.qty + 1 } : i));
-      return [...prev, { productId: p.id, name: p.name, price: p.price, qty: 1 }];
-    });
-  };
-  const inc = (pid: string) => setCart((prev) => prev.map((i) => (i.productId === pid ? { ...i, qty: i.qty + 1 } : i)));
-  const dec = (pid: string) =>
-    setCart((prev) => prev.map((i) => (i.productId === pid ? { ...i, qty: Math.max(1, i.qty - 1) } : i)));
-  const rm = (pid: string) => setCart((prev) => prev.filter((i) => i.productId !== pid));
+  const subtotal = useMemo(()=>cart.reduce((s,i)=>s+i.price*i.qty,0),[cart]);
+  const shipping = useMemo(()=>calcShipping(distance),[distance]);
+  const total = subtotal+shipping;
 
-  const subtotal = React.useMemo(() => cart.reduce((s, i) => s + i.price * i.qty, 0), [cart]);
-  const shipping = React.useMemo(() => calcShipping(Number.isFinite(distanceKm) ? distanceKm : 1), [distanceKm]);
-  const total = subtotal + shipping;
+  useEffect(()=>{
+    (async()=>{
+      const qProd = query(collection(db,"products"), where("outlet","==",outlet), where("active","==",true));
+      const snap = await getDocs(qProd);
+      const rows:Product[] = snap.docs.map(d=>({id:d.id,...(d.data() as any)}));
+      setMenu(rows);
+      setLoading(false);
+    })();
+  },[outlet]);
 
-  async function submitOrder() {
-    if (!custName.trim() || !custPhone.trim() || !custAddr.trim()) {
-      alert("Nama, nomor HP, dan alamat wajib diisi."); return;
-    }
-    if (cart.length === 0) {
-      alert("Keranjang masih kosong."); return;
-    }
+  async function submitOrder(){
+    if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
+    if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas dan alamat.");
     setSending(true);
-    try {
-      const payload: DeliveryOrder = {
-        outlet,
-        items: cart.map((i) => ({ productId: i.productId, name: i.name, price: i.price, qty: i.qty })),
-        note: note || undefined,
-        customer: { name: custName.trim(), phone: custPhone.trim(), address: custAddr.trim() },
-        payment: pay,
-        distanceKm: Number(distanceKm) || 1,
-        shippingCost: shipping,
-        subtotal,
-        total,
-        status: "new",
-        createdAt: serverTimestamp(),
-      };
-      const ref = await addDoc(collection(db, "orders"), payload as any);
-      alert("Pesanan terkirim!\nKode: " + ref.id + (pay === "qris" ? "\nSilakan lanjut scan QR/konfirmasi." : ""));
-      // reset ringan
-      setCart([]); setNote(""); setDistanceKm(1);
-    } catch (e: any) {
-      alert("Gagal mengirim pesanan: " + (e?.message || e));
-    } finally {
-      setSending(false);
-    }
+    const saleData = {
+      outlet,
+      source:"public",
+      customerName:custName,
+      customerPhone:custPhone,
+      address:custAddr,
+      distance,
+      method,
+      time: serverTimestamp(),
+      items: cart.map(c=>({name:c.name,price:c.price,qty:c.qty})),
+      subtotal, shipping, total, status:"pending"
+    };
+    await addDoc(collection(db,"orders"), saleData);
+    setSending(false);
+    alert("Pesanan terkirim ✅\nSilakan tunggu konfirmasi admin.");
+    setCart([]);
+    setCustName(""); setCustPhone(""); setCustAddr(""); setDistance(0);
   }
 
+  if(loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
+
   return (
-    <div className="min-h-screen bg-neutral-50">
-      <header className="bg-white border-b sticky top-0">
-        <div className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src="/brand-logo.png" alt="logo" className="h-8 w-8 rounded" onError={(e:any)=>{e.currentTarget.style.display='none'}}/>
-            <div>
-              <div className="font-bold">NamiPOS — {outlet}</div>
-              <div className="text-[11px] text-neutral-500">Public Order</div>
-            </div>
-          </div>
-          <a href="/" className="text-sm text-emerald-700">Masuk sebagai staf</a>
+    <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white p-4">
+      <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow p-4">
+        <h1 className="text-2xl font-bold mb-3 text-center">Pesan Online — {outlet}</h1>
+
+        {/* Data pelanggan */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-4">
+          <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={e=>setCustName(e.target.value)} />
+          <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={e=>setCustPhone(e.target.value)} />
         </div>
-      </header>
+        <textarea className="border rounded-lg px-3 py-2 w-full mb-2" rows={2} placeholder="Alamat pengantaran" value={custAddr} onChange={e=>setCustAddr(e.target.value)} />
+        <label className="flex items-center gap-2 mb-4 text-sm">
+          <span>Jarak (km)</span>
+          <input type="number" className="border rounded-lg px-2 py-1 w-20" value={distance} onChange={e=>setDistance(Number(e.target.value)||0)} />
+          <span className="text-neutral-500 text-xs">1 km pertama gratis • {IDR(calcShipping(distance))}</span>
+        </label>
 
-      <main className="max-w-5xl mx-auto px-3 sm:px-4 md:px-6 py-4 grid grid-cols-1 md:grid-cols-12 gap-4">
-        {/* Produk */}
-        <section className="md:col-span-7">
-          <div className="bg-white rounded-2xl border p-3 mb-2">
-            <input
-              className="border rounded-lg px-3 py-2 w-full"
-              placeholder="Cari menu…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-3">
-            {filtered.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => addToCart(p)}
-                className="text-left rounded-2xl border bg-white p-3 hover:shadow"
-              >
-                <div className="h-20 w-full rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2" />
-                <div className="font-medium leading-tight">{p.name}</div>
-                <div className="text-xs text-neutral-500">{p.category || "Menu"}</div>
-                <div className="mt-1 font-semibold">{IDR(p.price)}</div>
-              </button>
-            ))}
-            {filtered.length === 0 && (
-              <div className="text-sm text-neutral-500 col-span-full">Menu belum tersedia / belum aktif.</div>
-            )}
-          </div>
-        </section>
-
-        {/* Keranjang + Data */}
-        <section className="md:col-span-5">
-          <div className="bg-white rounded-2xl border p-3">
-            <div className="grid grid-cols-1 gap-2 mb-2">
-              <input className="border rounded-lg px-3 py-2" placeholder="Nama" value={custName} onChange={(e)=>setCustName(e.target.value)} />
-              <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={(e)=>setCustPhone(e.target.value)} />
-              <textarea className="border rounded-lg px-3 py-2" placeholder="Alamat lengkap" rows={2} value={custAddr} onChange={(e)=>setCustAddr(e.target.value)} />
-              <textarea className="border rounded-lg px-3 py-2" placeholder="Catatan pesanan (opsional)" rows={2} value={note} onChange={(e)=>setNote(e.target.value)} />
-            </div>
-
-            {cart.length === 0 ? (
-              <div className="text-sm text-neutral-500">Keranjang kosong.</div>
-            ) : (
-              <div className="space-y-2">
-                {cart.map((ci) => (
-                  <div key={ci.productId} className="grid grid-cols-12 items-center gap-2 rounded-xl border p-2">
-                    <div className="col-span-6">
-                      <div className="font-medium leading-tight">{ci.name}</div>
-                    </div>
-                    <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
-                    <div className="col-span-3 flex items-center justify-end gap-2">
-                      <button className="px-2 py-1 border rounded" onClick={() => dec(ci.productId)}>-</button>
-                      <div className="w-8 text-center font-medium">{ci.qty}</div>
-                      <button className="px-2 py-1 border rounded" onClick={() => inc(ci.productId)}>+</button>
-                    </div>
-                    <div className="col-span-1 text-right">
-                      <button className="px-2 py-1 rounded border" onClick={() => rm(ci.productId)}>x</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* ongkir & total */}
-            <div className="my-3 border-t pt-3 space-y-2">
-              <label className="flex items-center gap-2 text-sm">
-                <span className="w-32">Jarak (km)</span>
-                <input
-                  type="number"
-                  className="border rounded-lg px-2 py-1 w-28"
-                  min={1}
-                  step="0.1"
-                  value={distanceKm}
-                  onChange={(e) => setDistanceKm(Number(e.target.value) || 1)}
-                />
-              </label>
-              <div className="flex items-center justify-between text-sm">
-                <span>Subtotal</span><span className="font-medium">{IDR(subtotal)}</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span>Ongkir</span><span className="font-medium">{IDR(shipping)}</span>
-              </div>
-              <div className="flex items-center justify-between text-lg font-semibold">
-                <span>Total</span><span>{IDR(total)}</span>
-              </div>
-            </div>
-
-            {/* metode bayar */}
-            <div className="grid grid-cols-1 gap-2 mb-2">
-              <select className="border rounded-lg px-3 py-2" value={pay} onChange={(e)=>setPay(e.target.value as any)}>
-                <option value="qris">QRIS (online)</option>
-                <option value="cod">COD (bayar di tempat)</option>
-              </select>
-              {pay === "qris" && (
-                <div className="text-xs text-neutral-600">Setelah pesan dibuat, kasir akan mengirim QR untuk pembayaran.</div>
-              )}
-            </div>
-
+        {/* Menu list */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-4">
+          {menu.map(p=>(
             <button
-              className="w-full px-3 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50"
-              onClick={submitOrder}
-              disabled={sending || cart.length===0}
-            >
-              {sending ? "Mengirim..." : "Kirim Pesanan"}
+              key={p.id}
+              onClick={()=>setCart(prev=>{
+                const same=prev.find(ci=>ci.productId===p.id);
+                if(same) return prev.map(ci=>ci.productId===p.id?{...ci,qty:ci.qty+1}:ci);
+                return [...prev,{id:uid(),productId:p.id,name:p.name,price:p.price,qty:1}];
+              })}
+              className="bg-white border rounded-2xl p-3 text-left hover:shadow">
+              <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
+                {p.imageUrl && <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/>}
+              </div>
+              <div className="font-medium">{p.name}</div>
+              <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
+              <div className="font-semibold mt-1">{IDR(p.price)}</div>
             </button>
-          </div>
-        </section>
-      </main>
+          ))}
+        </div>
+
+        {/* Cart */}
+        <div className="bg-neutral-50 border rounded-2xl p-3 mb-4">
+          {cart.length===0 ? (
+            <div className="text-sm text-neutral-500">Belum ada item dipilih.</div>
+          ):(
+            <div className="space-y-2">
+              {cart.map(ci=>(
+                <div key={ci.id} className="flex items-center justify-between border rounded-xl p-2">
+                  <div>
+                    <div className="font-medium">{ci.name}</div>
+                    <div className="text-xs text-neutral-500">{ci.qty} × {IDR(ci.price)}</div>
+                  </div>
+                  <button className="px-2 py-1 border rounded" onClick={()=>setCart(prev=>prev.filter(x=>x.id!==ci.id))}>x</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {cart.length>0 && (
+            <div className="mt-3 space-y-1 text-sm">
+              <div className="flex justify-between"><span>Subtotal</span><span>{IDR(subtotal)}</span></div>
+              <div className="flex justify-between"><span>Ongkir</span><span>{IDR(shipping)}</span></div>
+              <div className="flex justify-between font-semibold"><span>Total</span><span>{IDR(total)}</span></div>
+            </div>
+          )}
+        </div>
+
+        {/* Metode bayar */}
+        <div className="mb-4">
+          <label className="block mb-1 text-sm font-medium">Metode pembayaran</label>
+          <select className="border rounded-lg px-3 py-2" value={method} onChange={e=>setMethod(e.target.value as any)}>
+            <option value="qris">QRIS (online)</option>
+            <option value="cod">Bayar di Tempat (COD)</option>
+          </select>
+          {method==="qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
+        </div>
+
+        <button
+          disabled={sending}
+          className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
+          onClick={submitOrder}>
+          {sending?"Mengirim...":"Kirim Pesanan"}
+        </button>
+      </div>
     </div>
   );
 }
 
-/* ==========================
-   PUBLIC ORDER COMPONENT
-========================== */
-function PublicOrder() {
-  const [products, setProducts] = useState<Product[]>([]);
-  const [queryText, setQueryText] = useState("");
-  const [cart, setCart] = useState<CartItem[]>([]);
-  const [custName, setCustName] = useState("");
-  const [custPhone, setCustPhone] = useState("");
-  const [address, setAddress] = useState("");
-  const [pay, setPay] = useState<"COD" | "QRIS">("COD");
-
-  const filtered = useMemo(() => products.filter(p => (p.active !== false) && p.name.toLowerCase().includes(queryText.toLowerCase())), [products, queryText]);
-  const subtotal = useMemo(() => cart.reduce((s, i) => s + i.price * i.qty, 0), [cart]);
-  const deliveryFee = 0; // (versi simple; bisa ditambah jarak/ongkir di V2.5.x lanjutan)
-  const total = subtotal + deliveryFee;
-
-  useEffect(() => {
-    const qProd = query(collection(db, "products"), where("outlet", "==", OUTLET), where("active", "==", true));
-    const unsub = onSnapshot(qProd, snap => {
-      const rows: Product[] = snap.docs.map(d => {
-        const x = d.data() as any;
-        return { id: d.id, name: x.name, price: x.price, category: x.category, active: x.active, outlet: x.outlet, image: x.image || null };
-      });
-      setProducts(rows);
-    });
-    return () => unsub();
-  }, []);
-
-  function add(p: Product) {
-    setCart(prev => {
-      const f = prev.find(ci => ci.productId === p.id);
-      if (f) return prev.map(ci => ci.productId === p.id ? { ...ci, qty: ci.qty + 1 } : ci);
-      return [...prev, { id: uid(), productId: p.id, name: p.name, price: p.price, qty: 1 }];
-    });
-  }
-  const inc = (id: string) => setCart(prev => prev.map(ci => ci.id === id ? { ...ci, qty: ci.qty + 1 } : ci));
-  const dec = (id: string) => setCart(prev => prev.map(ci => ci.id === id ? { ...ci, qty: Math.max(1, ci.qty - 1) } : ci));
-  const rm = (id: string) => setCart(prev => prev.filter(ci => ci.id !== id));
-
-  async function submitOrder() {
-    if (!custName.trim() || !custPhone.trim()) return alert("Isi nama & no HP.");
-    if (cart.length === 0) return alert("Keranjang kosong.");
-    try {
-      const payload: Omit<OrderPublic, "id"> = {
-        outlet: OUTLET,
-        time: serverTimestamp() as any,
-        customerName: custName.trim(),
-        customerPhone: custPhone.trim(),
-        address: address.trim() || null,
-        payMethod: pay,
-        items: cart.map(i => ({ name: i.name, price: i.price, qty: i.qty })),
-        subtotal,
-        deliveryFee,
-        total,
-        status: "pending"
-      };
-      await addDoc(collection(db, "orders"), payload as any);
-      alert("Pesanan terkirim. Terima kasih!");
-      setCart([]); setCustName(""); setCustPhone(""); setAddress("");
-    } catch (e: any) {
-      alert("Gagal mengirim pesanan: " + (e?.message || e));
-    }
-  }
-
-  return (
-    <div className="min-h-screen bg-neutral-50">
-      <header className="sticky top-0 bg-white/80 backdrop-blur border-b">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <img src="/logo.png" alt="logo" className="h-8 w-8 rounded-xl object-contain" />
-            <div className="font-bold">Order — {OUTLET}</div>
-          </div>
-        </div>
-      </header>
-
-      <main className="max-w-5xl mx-auto px-4 py-4 grid grid-cols-1 md:grid-cols-12 gap-4">
-        <section className="md:col-span-7">
-          <div className="bg-white rounded-2xl border p-3 mb-2">
-            <input className="border rounded-lg px-3 py-2 w-full" placeholder="Cari menu…" value={queryText} onChange={e => setQueryText(e.target.value)} />
-          </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 gap-3">
-            {filtered.map(p => (
-              <button key={p.id} onClick={() => add(p)} className="bg-white rounded-2xl border p-3 text-left hover:shadow">
-                <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
-                  {p.image ? <img src={p.image} alt={p.name} className="w-full h-full object-cover" /> : null}
-                </div>
-                <div className="font-medium leading-tight">{p.name}</div>
-                <div className="text-xs text-neutral-500">{p.category || "Signature"}</div>
-                <div className="font-semibold mt-1">{IDR(p.price)}</div>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        <section className="md:col-span-5">
-          <div className="bg-white rounded-2xl border p-3">
-            <div className="grid grid-cols-1 gap-2 mb-2">
-              <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={e => setCustName(e.target.value)} />
-              <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={e => setCustPhone(e.target.value)} />
-              <textarea className="border rounded-lg px-3 py-2" placeholder="Alamat (opsional)" value={address} onChange={e => setAddress(e.target.value)} />
-            </div>
-            <div className="grid grid-cols-1 gap-2 mb-3">
-              <select className="border rounded-lg px-3 py-2" value={pay} onChange={e => setPay(e.target.value as any)}>
-                <option value="COD">COD (Bayar di tempat)</option>
-                <option value="QRIS">QRIS (Online)</option>
-              </select>
-            </div>
-
-            {cart.length === 0 ? (
-              <div className="text-sm text-neutral-500">Keranjang kosong.</div>
-            ) : (
-              <div className="space-y-2 mb-3">
-                {cart.map(ci => (
-                  <div key={ci.id} className="grid grid-cols-12 items-center gap-2 border rounded-xl p-2">
-                    <div className="col-span-6">
-                      <div className="font-medium leading-tight">{ci.name}</div>
-                    </div>
-                    <div className="col-span-2 text-right text-sm">{IDR(ci.price)}</div>
-                    <div className="col-span-3 flex items-center justify-end gap-2">
-                      <button className="px-2 py-1 border rounded" onClick={() => dec(ci.id)}>-</button>
-                      <div className="w-8 text-center font-medium">{ci.qty}</div>
-                      <button className="px-2 py-1 border rounded" onClick={() => inc(ci.id)}>+</button>
-                    </div>
-                    <div className="col-span-1 text-right">
-                      <button className="px-2 py-1 rounded border" onClick={() => rm(ci.id)}>x</button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="my-3 border-t pt-3 space-y-2">
-              <div className="flex items-center justify-between text-sm"><span>Subtotal</span><span className="font-medium">{IDR(subtotal)}</span></div>
-              <div className="flex items-center justify-between text-sm"><span>Ongkir</span><span className="font-medium">{IDR(deliveryFee)}</span></div>
-              <div className="flex items-center justify-between text-lg font-semibold">
-                <span>Total</span><span>{IDR(total)}</span>
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <button className="px-4 py-2 rounded-lg bg-emerald-600 text-white disabled:opacity-50" disabled={cart.length === 0} onClick={submitOrder}>
-                Kirim Pesanan
-              </button>
-            </div>
-          </div>
-        </section>
-      </main>
-    </div>
-  );
+/* ===========================================================
+   ENTRY POINT DETECTOR (jika /order maka render PublicOrder)
+   =========================================================== */
+if (window.location.pathname === "/order") {
+  const root = ReactDOM.createRoot(document.getElementById("root")!);
+  root.render(<PublicOrder />);
 }
