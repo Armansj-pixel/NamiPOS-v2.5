@@ -1,4 +1,4 @@
-/* App.tsx — NamiPOS v2.5.6 (Full Stable + Elegant UI)
+ini/* App.tsx — NamiPOS v2.5.6 (Full Stable + Elegant UI)
    Semua fitur: POS, Shift, Produk, Inventori, Resep (auto stock), Loyalty (15k=1poin, 10 poin = 1 gratis),
    Riwayat, Dashboard, Orders admin, Public Order (/order)
 */
@@ -1617,3 +1617,4 @@ export function PublicOrder() {
     </div>
   </div>
 )}
+}
