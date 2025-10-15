@@ -1228,74 +1228,87 @@ return (
       </div>
     )}
 
-    {/* NOTE: Modal Produk / Inventori / Resep dikirim pada PART 4 */}
+    {/* Modal QR */}
+{showQR && (
+  <div
+    className="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
+    onClick={() => setShowQR(false)}
+  >
+    <div className="bg-white rounded-2xl p-4" onClick={(e) => e.stopPropagation()}>
+      <img src={QRIS_IMG_SRC} alt="QRIS" className="w-72" />
+      <div className="text-center mt-2 text-sm">Scan untuk bayar • {IDR(total)}</div>
+    </div>
   </div>
-);
-// === PART 3 ends ===
-// === PART 4 starts ===
-
-/* ==========================
-   MODALS (Produk, Inventori, Resep)
-========================== */
+)}
 
 {/* Product Modal */}
 {showProdModal && (
-  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowProdModal(false)}>
-    <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
-      <h3 className="font-semibold mb-2">{prodForm.id?"Edit Produk":"Tambah Produk"}</h3>
+  <div
+    className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+    onClick={() => setShowProdModal(false)}
+  >
+    <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+      <h3 className="font-semibold mb-2">{prodForm.id ? "Edit Produk" : "Tambah Produk"}</h3>
       <div className="space-y-2">
         <input
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Nama"
           value={igFormSafe(prodForm.name)}
-          onChange={e=>setProdForm({...prodForm, name:e.target.value})}
+          onChange={(e) => setProdForm({ ...prodForm, name: e.target.value })}
         />
         <input
           type="number"
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Harga"
-          value={Number(prodForm.price||0)}
-          onChange={e=>setProdForm({...prodForm, price:Number(e.target.value)||0})}
+          value={Number(prodForm.price || 0)}
+          onChange={(e) => setProdForm({ ...prodForm, price: Number(e.target.value) || 0 })}
         />
         <input
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Kategori (opsional)"
-          value={igFormSafe(prodForm.category,"Signature")}
-          onChange={e=>setProdForm({...prodForm, category:e.target.value})}
+          value={igFormSafe(prodForm.category, "Signature")}
+          onChange={(e) => setProdForm({ ...prodForm, category: e.target.value })}
         />
         <input
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="URL Gambar (opsional)"
           value={igFormSafe(prodForm.imageUrl)}
-          onChange={e=>setProdForm({...prodForm, imageUrl:e.target.value})}
+          onChange={(e) => setProdForm({ ...prodForm, imageUrl: e.target.value })}
         />
         <label className="inline-flex items-center gap-2 text-sm">
           <input
             type="checkbox"
-            checked={prodForm.active!==false}
-            onChange={e=>setProdForm({...prodForm, active:e.target.checked})}
+            checked={prodForm.active !== false}
+            onChange={(e) => setProdForm({ ...prodForm, active: e.target.checked })}
           />
           Aktif
         </label>
       </div>
       <div className="mt-3 flex justify-end gap-2">
-        <button className="px-3 py-2 border rounded" onClick={()=>setShowProdModal(false)}>Batal</button>
+        <button className="px-3 py-2 border rounded" onClick={() => setShowProdModal(false)}>
+          Batal
+        </button>
         <button
           className="px-3 py-2 bg-emerald-600 text-white rounded"
-          onClick={async ()=>{
-            if(!isOwner) return alert("Hanya owner.");
-            if(!prodForm.name || (prodForm.price??0)<=0) return alert("Nama & harga wajib diisi.");
+          onClick={async () => {
+            if (!isOwner) return alert("Hanya owner.");
+            if (!prodForm.name || (prodForm.price ?? 0) <= 0) return alert("Nama & harga wajib diisi.");
             const id = (prodForm.id as string) || uid();
-            await setDoc(doc(db,"products",id), {
-              outlet: OUTLET,
-              name: prodForm.name,
-              price: Number(prodForm.price||0),
-              imageUrl: prodForm.imageUrl || "",
-              category: prodForm.category || "Signature",
-              active: prodForm.active!==false
-            }, { merge:true });
+            await setDoc(
+              doc(db, "products", id),
+              {
+                outlet: OUTLET,
+                name: prodForm.name,
+                price: Number(prodForm.price || 0),
+                imageUrl: prodForm.imageUrl || "",
+                category: prodForm.category || "Signature",
+                active: prodForm.active !== false,
+              },
+              { merge: true }
+            );
             setShowProdModal(false);
-          }}>
+          }}
+        >
           Simpan
         </button>
       </div>
@@ -1305,54 +1318,64 @@ return (
 
 {/* Ingredient Modal */}
 {showIngModal && (
-  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowIngModal(false)}>
-    <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={e=>e.stopPropagation()}>
-      <h3 className="font-semibold mb-2">{ingForm.id?"Edit Bahan":"Tambah Bahan"}</h3>
+  <div
+    className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+    onClick={() => setShowIngModal(false)}
+  >
+    <div className="bg-white rounded-2xl p-4 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
+      <h3 className="font-semibold mb-2">{ingForm.id ? "Edit Bahan" : "Tambah Bahan"}</h3>
       <div className="space-y-2">
         <input
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Nama bahan"
           value={igFormSafe(ingForm.name)}
-          onChange={e=>setIngForm({...ingForm, name:e.target.value})}
+          onChange={(e) => setIngForm({ ...ingForm, name: e.target.value })}
         />
         <input
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Satuan (ml, gr, pcs...)"
-          value={igFormSafe(ingForm.unit,"pcs")}
-          onChange={e=>setIngForm({...ingForm, unit:e.target.value})}
+          value={igFormSafe(ingForm.unit, "pcs")}
+          onChange={(e) => setIngForm({ ...ingForm, unit: e.target.value })}
         />
         <input
           type="number"
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Stok"
-          value={Number(ingForm.stock||0)}
-          onChange={e=>setIngForm({...ingForm, stock:Number(e.target.value)||0})}
+          value={Number(ingForm.stock || 0)}
+          onChange={(e) => setIngForm({ ...ingForm, stock: Number(e.target.value) || 0 })}
         />
         <input
           type="number"
           className="border rounded-lg px-3 py-2 w-full"
           placeholder="Minimal stok (peringatan)"
-          value={Number(ingForm.min||0)}
-          onChange={e=>setIngForm({...ingForm, min:Number(e.target.value)||0})}
+          value={Number(ingForm.min || 0)}
+          onChange={(e) => setIngForm({ ...ingForm, min: Number(e.target.value) || 0 })}
         />
       </div>
       <div className="mt-3 flex justify-end gap-2">
-        <button className="px-3 py-2 border rounded" onClick={()=>setShowIngModal(false)}>Batal</button>
+        <button className="px-3 py-2 border rounded" onClick={() => setShowIngModal(false)}>
+          Batal
+        </button>
         <button
           className="px-3 py-2 bg-emerald-600 text-white rounded"
-          onClick={async ()=>{
-            if(!isOwner) return alert("Hanya owner.");
-            if(!ingForm.name) return alert("Nama bahan wajib diisi.");
+          onClick={async () => {
+            if (!isOwner) return alert("Hanya owner.");
+            if (!ingForm.name) return alert("Nama bahan wajib diisi.");
             const id = (ingForm.id as string) || uid();
-            await setDoc(doc(db,"ingredients",id), {
-              outlet: OUTLET,
-              name: ingForm.name,
-              unit: ingForm.unit||"pcs",
-              stock: Number(ingForm.stock||0),
-              min: Number(ingForm.min||0)
-            }, { merge:true });
+            await setDoc(
+              doc(db, "ingredients", id),
+              {
+                outlet: OUTLET,
+                name: ingForm.name,
+                unit: ingForm.unit || "pcs",
+                stock: Number(ingForm.stock || 0),
+                min: Number(ingForm.min || 0),
+              },
+              { merge: true }
+            );
             setShowIngModal(false);
-          }}>
+          }}
+        >
           Simpan
         </button>
       </div>
@@ -1362,45 +1385,64 @@ return (
 
 {/* Recipe Modal */}
 {showRecipeModal && recipeProduct && (
-  <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={()=>setShowRecipeModal(false)}>
-    <div className="bg-white rounded-2xl p-4 w-full max-w-lg" onClick={e=>e.stopPropagation()}>
+  <div
+    className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+    onClick={() => setShowRecipeModal(false)}
+  >
+    <div className="bg-white rounded-2xl p-4 w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
       <h3 className="font-semibold mb-2">Resep: {recipeProduct.name}</h3>
       <div className="space-y-2">
-        {recipeRows.map((r,idx)=>(
+        {recipeRows.map((r, idx) => (
           <div key={idx} className="grid grid-cols-6 gap-2">
             <select
               className="col-span-4 border rounded-lg px-2 py-2"
               value={r.ingredientId}
-              onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, ingredientId:e.target.value}:x))}
+              onChange={(e) =>
+                setRecipeRows((prev) => prev.map((x, i) => (i === idx ? { ...x, ingredientId: e.target.value } : x)))
+              }
             >
-              {ingredients.map(ing=><option key={ing.id} value={ing.id}>{ing.name} ({ing.unit})</option>)}
+              {ingredients.map((ing) => (
+                <option key={ing.id} value={ing.id}>
+                  {ing.name} ({ing.unit})
+                </option>
+              ))}
             </select>
             <input
               type="number"
               className="col-span-1 border rounded-lg px-2 py-2"
               value={r.qty}
-              onChange={e=>setRecipeRows(prev=>prev.map((x,i)=>i===idx?{...x, qty:Number(e.target.value)||0}:x))}
+              onChange={(e) =>
+                setRecipeRows((prev) => prev.map((x, i) => (i === idx ? { ...x, qty: Number(e.target.value) || 0 } : x)))
+              }
             />
-            <button className="col-span-1 border rounded" onClick={()=>setRecipeRows(prev=>prev.filter((_,i)=>i!==idx))}>x</button>
+            <button
+              className="col-span-1 border rounded"
+              onClick={() => setRecipeRows((prev) => prev.filter((_, i) => i !== idx))}
+            >
+              x
+            </button>
           </div>
         ))}
         <button
           className="px-3 py-2 border rounded"
-          onClick={()=>setRecipeRows(prev=>[...prev, {ingredientId: ingredients[0]?.id||"", qty:1}])}
+          onClick={() => setRecipeRows((prev) => [...prev, { ingredientId: ingredients[0]?.id || "", qty: 1 }])}
         >
           + Tambah baris
         </button>
       </div>
       <div className="mt-3 flex justify-end gap-2">
-        <button className="px-3 py-2 border rounded" onClick={()=>setShowRecipeModal(false)}>Batal</button>
+        <button className="px-3 py-2 border rounded" onClick={() => setShowRecipeModal(false)}>
+          Batal
+        </button>
         <button
           className="px-3 py-2 bg-emerald-600 text-white rounded"
-          onClick={async ()=>{
-            if(!isOwner) return alert("Hanya owner.");
-            const clean = recipeRows.filter(r => r.ingredientId && r.qty>0);
-            await setDoc(doc(db,"recipes", recipeProduct.id), { items: clean }, { merge:true });
+          onClick={async () => {
+            if (!isOwner) return alert("Hanya owner.");
+            const clean = recipeRows.filter((r) => r.ingredientId && r.qty > 0);
+            await setDoc(doc(db, "recipes", recipeProduct.id), { items: clean }, { merge: true });
             setShowRecipeModal(false);
-          }}>
+          }}
+        >
           Simpan Resep
         </button>
       </div>
@@ -1408,13 +1450,19 @@ return (
   </div>
 )}
 
+</div>
+); // end return
+} // ==== END function App ====
+
+
+
 /* ==========================
    HELPERS kecil (ui)
 ========================== */
 function igFormSafe<T extends string | number | undefined>(v: T, fallback: any = "") {
-  return (v===undefined || v===null) ? fallback : v;
+  return v === undefined || v === null ? fallback : v;
 }
-function KPI({title, value}:{title:string; value:string}) {
+function KPI({ title, value }: { title: string; value: string }) {
   return (
     <div className="bg-white border rounded-2xl p-4">
       <div className="text-[12px] text-neutral-500">{title}</div>
@@ -1423,12 +1471,10 @@ function KPI({title, value}:{title:string; value:string}) {
   );
 }
 
+
 /* ==========================
    PUBLIC ORDER (tanpa login) – /order
 ========================== */
-// - Menggunakan util param(), IDR, calcShipping, uid yang sudah dideklar di Part 1
-// - Menulis dokumen ke koleksi "orders"
-
 export function PublicOrder() {
   const outlet = param("outlet", OUTLET);
   const [loading, setLoading] = useState(true);
@@ -1438,83 +1484,121 @@ export function PublicOrder() {
   const [custPhone, setCustPhone] = useState("");
   const [custAddr, setCustAddr] = useState("");
   const [distanceKm, setDistanceKm] = useState<number>(0);
-  const [method, setMethod] = useState<"qris"|"cod">("qris");
+  const [method, setMethod] = useState<"qris" | "cod">("qris");
   const [sending, setSending] = useState(false);
 
-  const subtotal = useMemo(()=>cart.reduce((s,i)=>s+i.price*i.qty,0),[cart]);
-  const shipping = useMemo(()=>calcShipping(distanceKm),[distanceKm]);
-  const total = subtotal+shipping;
+  const subtotal = useMemo(() => cart.reduce((s, i) => s + i.price * i.qty, 0), [cart]);
+  const shipping = useMemo(() => calcShipping(distanceKm), [distanceKm]);
+  const total = subtotal + shipping;
 
-  useEffect(()=>{
-    (async()=>{
-      const qProd = query(collection(db,"products"), where("outlet","==",outlet), where("active","==",true));
+  useEffect(() => {
+    (async () => {
+      const qProd = query(
+        collection(db, "products"),
+        where("outlet", "==", outlet),
+        where("active", "==", true)
+      );
       const snap = await getDocs(qProd);
-      const rows:Product[] = snap.docs.map(d=>({id:d.id,...(d.data() as any)}));
+      const rows: Product[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
       setMenu(rows);
       setLoading(false);
     })();
-  },[outlet]);
+  }, [outlet]);
 
-  async function submitOrder(){
-    if(cart.length===0) return alert("Pilih menu terlebih dahulu.");
-    if(!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
+  async function submitOrder() {
+    if (cart.length === 0) return alert("Pilih menu terlebih dahulu.");
+    if (!custName || !custPhone || !custAddr) return alert("Lengkapi identitas & alamat.");
     setSending(true);
     const data = {
       outlet,
-      source:"public",
-      customerName:custName,
-      customerPhone:custPhone,
-      address:custAddr,
+      source: "public",
+      customerName: custName,
+      customerPhone: custPhone,
+      address: custAddr,
       distance: distanceKm,
       method,
       time: serverTimestamp(),
-      items: cart.map(c=>({productId:c.productId, name:c.name, price:c.price, qty:c.qty})),
-      subtotal, shipping, total, status:"pending"
+      items: cart.map((c) => ({ productId: c.productId, name: c.name, price: c.price, qty: c.qty })),
+      subtotal,
+      shipping,
+      total,
+      status: "pending",
     };
-    await addDoc(collection(db,"orders"), data);
+    await addDoc(collection(db, "orders"), data);
     setSending(false);
     alert("Pesanan terkirim ✅ Silakan tunggu konfirmasi admin.");
-    setCart([]); setCustName(""); setCustPhone(""); setCustAddr(""); setDistanceKm(0);
+    setCart([]);
+    setCustName("");
+    setCustPhone("");
+    setCustAddr("");
+    setDistanceKm(0);
   }
 
-  if(loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
+  if (loading) return <div className="p-6 text-center text-sm text-neutral-500">Memuat menu…</div>;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-50 to-white p-4">
       <div className="max-w-3xl mx-auto bg-white rounded-2xl shadow p-4">
         <div className="flex items-center gap-3 mb-3">
-          <img src={BRAND_LOGO} alt="Logo" className="h-9 w-9 rounded-xl object-cover"/>
+          <img src={BRAND_LOGO} alt="Logo" className="h-9 w-9 rounded-xl object-cover" />
           <h1 className="text-2xl font-bold">Pesan Online — {outlet}</h1>
         </div>
 
         {/* Data pelanggan */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-2">
-          <input className="border rounded-lg px-3 py-2" placeholder="Nama lengkap" value={custName} onChange={e=>setCustName(e.target.value)} />
-          <input className="border rounded-lg px-3 py-2" placeholder="No HP" value={custPhone} onChange={e=>setCustPhone(e.target.value)} />
+          <input
+            className="border rounded-lg px-3 py-2"
+            placeholder="Nama lengkap"
+            value={custName}
+            onChange={(e) => setCustName(e.target.value)}
+          />
+          <input
+            className="border rounded-lg px-3 py-2"
+            placeholder="No HP"
+            value={custPhone}
+            onChange={(e) => setCustPhone(e.target.value)}
+          />
         </div>
-        <textarea className="border rounded-lg px-3 py-2 w-full mb-2" rows={2} placeholder="Alamat pengantaran" value={custAddr} onChange={e=>setCustAddr(e.target.value)} />
+        <textarea
+          className="border rounded-lg px-3 py-2 w-full mb-2"
+          rows={2}
+          placeholder="Alamat pengantaran"
+          value={custAddr}
+          onChange={(e) => setCustAddr(e.target.value)}
+        />
         <label className="flex items-center gap-2 mb-4 text-sm">
           <span>Jarak (km)</span>
-          <input type="number" className="border rounded-lg px-2 py-1 w-24" value={distanceKm} onChange={e=>setDistanceKm(Number(e.target.value)||0)} />
-          <span className="text-neutral-500 text-xs">1 km pertama gratis • {IDR(calcShipping(distanceKm))}</span>
+          <input
+            type="number"
+            className="border rounded-lg px-2 py-1 w-24"
+            value={distanceKm}
+            onChange={(e) => setDistanceKm(Number(e.target.value) || 0)}
+          />
+          <span className="text-neutral-500 text-xs">
+            1 km pertama gratis • {IDR(calcShipping(distanceKm))}
+          </span>
         </label>
 
         {/* Menu list */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mb-4">
-          {menu.map(p=>(
+          {menu.map((p) => (
             <button
               key={p.id}
-              onClick={()=>setCart(prev=>{
-                const same=prev.find(ci=>ci.productId===p.id);
-                if(same) return prev.map(ci=>ci.productId===p.id?{...ci,qty:ci.qty+1}:ci);
-                return [...prev,{id:uid(),productId:p.id,name:p.name,price:p.price,qty:1}];
-              })}
-              className="bg-white border rounded-2xl p-3 text-left hover:shadow">
+              onClick={() =>
+                setCart((prev) => {
+                  const same = prev.find((ci) => ci.productId === p.id);
+                  if (same)
+                    return prev.map((ci) => (ci.productId === p.id ? { ...ci, qty: ci.qty + 1 } : ci));
+                  return [...prev, { id: uid(), productId: p.id, name: p.name, price: p.price, qty: 1 }];
+                })
+              }
+              className="bg-white border rounded-2xl p-3 text-left hover:shadow"
+            >
               <div className="h-20 rounded-xl bg-gradient-to-br from-emerald-50 to-emerald-100 mb-2 overflow-hidden">
-                {p.imageUrl && <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover"/>}
+                {p.imageUrl && <img src={p.imageUrl} alt={p.name} className="w-full h-20 object-cover" />}
               </div>
               <div className="font-medium">{p.name}</div>
-              <div className="text-xs text-neutral-500">{p.category||"Signature"}</div>
+              <div className="text-xs text-neutral-500">{p.category || "Signature"}</div>
               <div className="font-semibold mt-1">{IDR(p.price)}</div>
             </button>
           ))}
@@ -1522,26 +1606,42 @@ export function PublicOrder() {
 
         {/* Cart */}
         <div className="bg-neutral-50 border rounded-2xl p-3 mb-4">
-          {cart.length===0 ? (
+          {cart.length === 0 ? (
             <div className="text-sm text-neutral-500">Belum ada item dipilih.</div>
-          ):(
+          ) : (
             <div className="space-y-2">
-              {cart.map(ci=>(
+              {cart.map((ci) => (
                 <div key={ci.id} className="flex items-center justify-between border rounded-xl p-2">
                   <div>
                     <div className="font-medium">{ci.name}</div>
-                    <div className="text-xs text-neutral-500">{ci.qty} × {IDR(ci.price)}</div>
+                    <div className="text-xs text-neutral-500">
+                      {ci.qty} × {IDR(ci.price)}
+                    </div>
                   </div>
-                  <button className="px-2 py-1 border rounded" onClick={()=>setCart(prev=>prev.filter(x=>x.id!==ci.id))}>x</button>
+                  <button
+                    className="px-2 py-1 border rounded"
+                    onClick={() => setCart((prev) => prev.filter((x) => x.id !== ci.id))}
+                  >
+                    x
+                  </button>
                 </div>
               ))}
             </div>
           )}
-          {cart.length>0 && (
+          {cart.length > 0 && (
             <div className="mt-3 space-y-1 text-sm">
-              <div className="flex justify-between"><span>Subtotal</span><span>{IDR(subtotal)}</span></div>
-              <div className="flex justify-between"><span>Ongkir</span><span>{IDR(shipping)}</span></div>
-              <div className="flex justify-between font-semibold"><span>Total</span><span>{IDR(total)}</span></div>
+              <div className="flex justify-between">
+                <span>Subtotal</span>
+                <span>{IDR(subtotal)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>Ongkir</span>
+                <span>{IDR(shipping)}</span>
+              </div>
+              <div className="flex justify-between font-semibold">
+                <span>Total</span>
+                <span>{IDR(total)}</span>
+              </div>
             </div>
           )}
         </div>
@@ -1549,22 +1649,25 @@ export function PublicOrder() {
         {/* Metode bayar */}
         <div className="mb-4">
           <label className="block mb-1 text-sm font-medium">Metode pembayaran</label>
-          <select className="border rounded-lg px-3 py-2" value={method} onChange={e=>setMethod(e.target.value as any)}>
+          <select
+            className="border rounded-lg px-3 py-2"
+            value={method}
+            onChange={(e) => setMethod(e.target.value as any)}
+          >
             <option value="qris">QRIS (online)</option>
             <option value="cod">Bayar di Tempat (COD)</option>
           </select>
-          {method==="qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
+          {method === "qris" && <img src={QRIS_IMG_SRC} alt="QRIS" className="mt-2 w-40" />}
         </div>
 
         <button
           disabled={sending}
           className="w-full bg-emerald-600 text-white rounded-lg py-3 text-lg font-semibold disabled:opacity-50"
-          onClick={submitOrder}>
-          {sending?"Mengirim...":"Kirim Pesanan"}
+          onClick={submitOrder}
+        >
+          {sending ? "Mengirim..." : "Kirim Pesanan"}
         </button>
       </div>
     </div>
   );
 }
-
-// === PART 4 ends ===
