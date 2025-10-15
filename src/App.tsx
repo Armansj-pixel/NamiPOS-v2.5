@@ -41,16 +41,18 @@ type CartItem = { id: string; productId: string; name: string; price: number; qt
 type Shift = { id: string; outlet: string; openBy: string; openAt: Timestamp; closeAt?: Timestamp | null; openCash?: number; isOpen: boolean; };
 type Sale = {
   id?: string; outlet: string; shiftId: string | null; cashierEmail: string;
-  customerPhone: string | null; customerName?: string | null; time: Timestamp | null;
+  customerPhone: string | null; customerName?: string | null; time: any; // <- ubah ke any
   items: { name: string; price: number; qty: number; note?: string }[];
   subtotal: number; discount: number; tax: number; service: number;
   total: number; payMethod: "cash" | "ewallet" | "qris"; cash?: number; change?: number;
   pointsEarned?: number; usedFreeDrink?: boolean;
 };
+
 type PublicOrderDoc = {
   id: string; outlet: string; source: "public"; customerName: string;
   customerPhone: string; address: string; distance: number; method: "qris" | "cod";
-  time: Timestamp | null; items: { productId?: string; name: string; price: number; qty: number; note?: string }[];
+  time: any; // <- ubah ke any
+  items: { productId?: string; name: string; price: number; qty: number; note?: string }[];
   subtotal: number; shipping: number; total: number; status: "pending" | "accepted" | "rejected" | "done"; saleId?: string;
 };
 
@@ -1634,6 +1636,8 @@ export function PublicOrder() {
     </div>
   );
 } // <--- INI KURUNG KURAWAL PENUTUP YANG HILANG
+
+
 
 
 
