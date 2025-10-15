@@ -71,6 +71,14 @@ const IDR = (n: number) => new Intl.NumberFormat("id-ID", { style: "currency", c
 const startOfDay = (d = new Date()) => { const x = new Date(d); x.setHours(0,0,0,0); return x; };
 const endOfDay   = (d = new Date()) => { const x = new Date(d); x.setHours(23,59,59,999); return x; };
 const daysAgo    = (n: number) => { const x = new Date(); x.setDate(x.getDate() - n); return x; };
+// ambil query param dengan default
+const param = (k: string, def = "") => {
+  try {
+    return new URLSearchParams(window.location.search).get(k) || def;
+  } catch {
+    return def;
+  }
+};
 // Ongkir: 1 km pertama gratis lalu 2.000/km (dibulatkan ke atas)
 const calcShipping = (km: number) => {
   const afterFree = Math.max(0, (Number.isFinite(km) ? km : 1) - 1);
