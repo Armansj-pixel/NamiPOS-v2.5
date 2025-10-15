@@ -162,6 +162,7 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
 
   /* ---- dashboard ---- */
+
   const [dashLoading, setDashLoading] = useState(false);
   const [todayStats, setTodayStats] = useState({ omzet:0, trx:0, avg:0, cash:0, ewallet:0, qris:0, topItems: [] as {name:string;qty:number}[] });
   const [last7, setLast7] = useState<{date:string; omzet:number; trx:number}[]>([]);
@@ -179,6 +180,32 @@ export default function App() {
   const loyaltyDiscount = useFreeDrink ? Math.min(cheapest, totalBeforeLoyalty) : 0;
   const total = Math.max(0, totalBeforeLoyalty - loyaltyDiscount);
   const change = Math.max(0, (cash||0) - total);
+/* ---- modals & forms (products / ingredients / recipes) ---- */
+  // Product modal
+  const [showProdModal, setShowProdModal] = useState(false);
+  const [prodForm, setProdForm] = useState<{
+    id?: string;
+    name?: string;
+    price?: number;
+    imageUrl?: string;
+    category?: string;
+    active?: boolean;
+  }>({});
+
+  // Ingredient modal
+  const [showIngModal, setShowIngModal] = useState(false);
+  const [ingForm, setIngForm] = useState<{
+    id?: string;
+    name?: string;
+    unit?: string;
+    stock?: number;
+    min?: number;
+  }>({});
+
+  // Recipe modal
+  const [showRecipeModal, setShowRecipeModal] = useState(false);
+  const [recipeProduct, setRecipeProduct] = useState<Product | null>(null);
+  const [recipeRows, setRecipeRows] = useState<RecipeItem[]>([]);
 
   /* ==========================
      AUTH WATCH
