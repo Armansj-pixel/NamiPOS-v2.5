@@ -134,10 +134,7 @@ export default function App() {
   const [customerPoints, setCustomerPoints] = useState<number|null>(null);
   const [useFreeDrink, setUseFreeDrink] = useState(false);
 
-  /* placeholder sementara */
-  return <div className="p-4 text-sm">🚀 Lanjutkan tempel PART 2 tepat di bawah baris ini</div>;
-}
-// === PART 2 starts ===
+  // === PART 2 starts ===
 // (hapus 2 baris placeholder di Part 1: `/* placeholder sementara */` dan `return <div ... />; }`)
 
   /* ===== derived ===== */
